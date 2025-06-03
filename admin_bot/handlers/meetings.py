@@ -16,7 +16,8 @@ from database.db import (
     get_active_cities, get_city, add_meeting_member, remove_meeting_member,
     get_meeting_members, count_meeting_members, get_user, pool, get_venues_by_city, get_venue,
     get_available_dates, get_available_date, update_available_date, get_available_dates_with_users_count,
-    get_users_by_time_preference, get_compatible_users_for_meeting, create_meeting_from_available_date
+    get_users_by_time_preference, get_compatible_users_for_meeting, create_meeting_from_available_date,
+    get_pending_applications_by_timeslot
 )
 from config import MIN_MEETING_SIZE, MAX_MEETING_SIZE
 from services.notification_service import NotificationService
@@ -764,7 +765,9 @@ async def continue_smart_meeting_after_venue(msg_obj, state: FSMContext):
         time_slot_id = slot_row['id']
     await state.update_data(time_slot_id=time_slot_id)
     # --- Получаем аппликантов ---
-    applicants = await get_applicants_for_meeting(time_slot_id, 0)
+    city = await get_city(city_id)
+    async with pool.acquire() as conn:
+        applicants = await get_pending_applications_by_timeslot(city_id, time_slot_id)
     if not applicants:
         await msg_obj.answer("Нет подходящих аппликантов для этой встречи.")
         return
@@ -774,7 +777,7 @@ async def continue_smart_meeting_after_venue(msg_obj, state: FSMContext):
     builder = InlineKeyboardBuilder()
     for a in applicants:
         builder.add(InlineKeyboardButton(
-            text=f"{a['name']} (@{a['username'] or '-'}), {a['age']}",
+            text=f"{a['user_name']} (@{a['user_username'] or '-'}), {a['user_age']}",
             callback_data=f"smart_view_user_{a['user_id']}"
         ))
     builder.add(InlineKeyboardButton(
@@ -1243,7 +1246,15 @@ async def show_meeting_members(callback: CallbackQuery, state: FSMContext):
     builder.adjust(1)
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
+# --- Новый универсальный вызов профиля ---
 async def show_applicant_profile(callback, meeting_id, user_id, status, back_callback, state, show_return_button=False):
+    if not meeting_id:
+        await show_applicant_profile_for_smart(callback, user_id, back_callback)
+    else:
+        await show_applicant_profile_for_meeting(callback, meeting_id, user_id, status, back_callback, state, show_return_button)
+
+# --- Профиль для обычной встречи ---
+async def show_applicant_profile_for_meeting(callback, meeting_id, user_id, status, back_callback, state, show_return_button=False):
     async with pool.acquire() as conn:
         user = await conn.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
         meeting = await conn.fetchrow('SELECT * FROM meetings WHERE id = $1', meeting_id)
@@ -1281,5 +1292,26 @@ async def show_applicant_profile(callback, meeting_id, user_id, status, back_cal
             text="Назад",
             callback_data=back_callback
         ))
+    builder.adjust(1)
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+# --- Профиль для smart meeting creation ---
+async def show_applicant_profile_for_smart(callback, user_id, back_callback):
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+    if not user:
+        await callback.message.edit_text("Пользователь не найден.")
+        return
+    text = (
+        f"<b>Профиль участника</b>\n"
+        f"Имя: {user['name']} {user['surname']}\n"
+        f"Возраст: {user['age']}\n"
+        f"Username: @{user['username'] or '-'}\n"
+    )
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="Назад",
+        callback_data=back_callback or "cancel_smart_meeting"
+    ))
     builder.adjust(1)
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
