@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: five_chairs_db
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-five_chairs}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-five_chairs}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - five_chairs_network
+
+  user_bot:
+    build: .
+    container_name: five_chairs_user_bot
+    command: python run_user_bot.py
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=postgres
+    volumes:
+      - logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep 'python run_user_bot.py' | grep -v grep || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - five_chairs_network
+
+  admin_bot:
+    build: .
+    container_name: five_chairs_admin_bot
+    command: python run_admin_bot.py
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=postgres
+    volumes:
+      - logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep 'python run_admin_bot.py' | grep -v grep || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - five_chairs_network
+
+  notification_service:
+    build: .
+    container_name: five_chairs_notification
+    command: python run_notification_service.py
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=postgres
+    volumes:
+      - logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep 'python run_notification_service.py' | grep -v grep || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - five_chairs_network
+
+  timeslot_service:
+    build: .
+    container_name: five_chairs_timeslot
+    command: python run_timeslot_service.py
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=postgres
+    volumes:
+      - logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep 'python run_timeslot_service.py' | grep -v grep || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - five_chairs_network
+
+volumes:
+  postgres_data:
+  logs:
+
+networks:
+  five_chairs_network:
+    driver: bridge

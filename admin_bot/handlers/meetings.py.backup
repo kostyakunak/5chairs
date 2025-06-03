@@ -1,0 +1,1178 @@
+import logging
+from aiogram import Router, F
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from datetime import datetime, date, time
+
+logger = logging.getLogger(__name__)
+
+from database.db import (
+    is_admin, create_group, get_groups_by_status, get_group, update_group_status,
+    get_active_cities, get_city, add_group_member, remove_group_member,
+    get_group_members, count_group_members, get_user, pool, get_venues_by_city, get_venue
+)
+from config import MIN_GROUP_SIZE, MAX_GROUP_SIZE
+from services.notification_service import NotificationService
+from admin_bot.states import GroupManagementStates
+
+# Create router
+router = Router()
+
+# Groups command handler
+@router.message(Command("groups"))
+async def cmd_groups(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Check if user is an admin
+    if not await is_admin(user_id):
+        await message.answer(
+            "Sorry, you are not authorized to use this command."
+        )
+        return
+    
+    # Create group management keyboard
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Create Group"), KeyboardButton(text="Manage Groups")],
+            [KeyboardButton(text="List Groups"), KeyboardButton(text="Back to Menu")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(
+        "Group Management\n\n"
+        "Here you can create and manage meeting groups.",
+        reply_markup=keyboard
+    )
+
+# Create group handler
+@router.message(F.text == "Create Group")
+async def create_group_command(message: Message, state: FSMContext):
+    # Check if user is an admin
+    if not await is_admin(message.from_user.id):
+        return
+    
+    await message.answer(
+        "Let's create a new group!\n\n"
+        "First, please enter a name for the group:"
+    )
+    
+    # Set state to wait for group name
+    await state.set_state(GroupManagementStates.create_name)
+
+# Process group name
+@router.message(GroupManagementStates.create_name)
+async def process_group_name(message: Message, state: FSMContext):
+    group_name = message.text.strip()
+    
+    # Validate group name
+    if not group_name:
+        await message.answer("Group name cannot be empty. Please try again:")
+        return
+    
+    # Save group name to state
+    await state.update_data(group_name=group_name)
+    
+    await message.answer(
+        "Please enter the meeting date in one of these formats:\n"
+        "- DD.MM.YYYY (e.g., 25.12.2025)\n"
+        "- YYYY-MM-DD (e.g., 2025-12-25)\n"
+        "- DD/MM/YYYY (e.g., 25/12/2025)"
+    )
+    
+    # Set state to wait for meeting date
+    await state.set_state(GroupManagementStates.create_date)
+
+# Process meeting date
+@router.message(GroupManagementStates.create_date)
+async def process_meeting_date(message: Message, state: FSMContext):
+    date_str = message.text.strip()
+    
+    # Parse and validate date format using helper function
+    from utils.helpers import parse_date
+    
+    meeting_date = parse_date(date_str)
+    
+    if not meeting_date:
+        await message.answer(
+            "Invalid date format. Please enter the date in format DD.MM.YYYY, YYYY-MM-DD, or DD/MM/YYYY:"
+        )
+        return
+    
+    # Check if date is in the future
+    if meeting_date < date.today():
+        await message.answer("Meeting date must be in the future. Please try again:")
+        return
+    
+    # Save meeting date to state
+    await state.update_data(meeting_date=meeting_date)
+    
+    await message.answer(
+        "Please enter the meeting time in one of these formats:\n"
+        "- HH:MM (e.g., 18:30)\n"
+        "- HH.MM (e.g., 18.30)"
+    )
+    
+    # Set state to wait for meeting time
+    await state.set_state(GroupManagementStates.create_time)
+
+# Process meeting time
+@router.message(GroupManagementStates.create_time)
+async def process_meeting_time(message: Message, state: FSMContext):
+    time_str = message.text.strip()
+    
+    # Parse and validate time format using helper function
+    from utils.helpers import parse_time
+    
+    meeting_time = parse_time(time_str)
+    
+    if not meeting_time:
+        await message.answer(
+            "Invalid time format. Please enter the time in 24-hour format (HH:MM or HH.MM):"
+        )
+        return
+    
+    # Save meeting time to state
+    await state.update_data(meeting_time=meeting_time)
+    
+    # Get cities from database
+    cities = await get_active_cities()
+    
+    if not cities:
+        await message.answer("There are no active cities in the database.")
+        await state.clear()
+        return
+    
+    # Create city selection keyboard
+    builder = InlineKeyboardBuilder()
+    for city in cities:
+        builder.add(InlineKeyboardButton(
+            text=city['name'],
+            callback_data=f"group_city_{city['id']}"
+        ))
+    builder.adjust(2)
+    
+    await message.answer(
+        "Please select the city for this meeting:",
+        reply_markup=builder.as_markup()
+    )
+    
+    # Set state to wait for city selection
+    await state.set_state(GroupManagementStates.create_city)
+
+# City selection handler
+@router.callback_query(GroupManagementStates.create_city, F.data.startswith("group_city_"))
+async def process_city_selection(callback: CallbackQuery, state: FSMContext):
+    # Extract city ID from callback data
+    city_id = int(callback.data.split("_")[2])
+    
+    # Save city ID to state
+    await state.update_data(city_id=city_id)
+    
+    # Get city for confirmation
+    city = await get_city(city_id)
+    
+    # Get venues for this city
+    venues = await get_venues_by_city(city_id)
+    
+    if not venues:
+        # No venues found, ask for manual entry
+        await callback.message.edit_text(
+            f"Selected city: {city['name']}\n\n"
+            f"No saved venues found for this city. Please enter the venue for this meeting:"
+        )
+        
+        # Set state to wait for manual venue entry
+        await state.set_state(GroupManagementStates.create_venue)
+        return
+    
+    # Create venue selection keyboard
+    builder = InlineKeyboardBuilder()
+    for venue in venues:
+        builder.add(InlineKeyboardButton(
+            text=venue['name'],
+            callback_data=f"group_venue_{venue['id']}"
+        ))
+    
+    # Add manual entry option
+    builder.add(InlineKeyboardButton(
+        text="Enter Custom Venue",
+        callback_data="group_venue_custom"
+    ))
+    
+    builder.adjust(2)
+    
+    await callback.message.edit_text(
+        f"Selected city: {city['name']}\n\n"
+        f"Please select a venue for this meeting:",
+        reply_markup=builder.as_markup()
+    )
+    
+    # Set state to wait for venue selection
+    await state.set_state(GroupManagementStates.create_venue)
+
+# Process venue selection from callback
+@router.callback_query(GroupManagementStates.create_venue, F.data.startswith("group_venue_"))
+async def process_venue_selection(callback: CallbackQuery, state: FSMContext):
+    # Extract venue ID or custom option from callback data
+    venue_data = callback.data.split("_")[2]
+    
+    if venue_data == "custom":
+        # User wants to enter a custom venue
+        await callback.message.edit_text(
+            "Please enter the custom venue for this meeting:"
+        )
+        return
+    
+    # Get venue details
+    venue_id = int(venue_data)
+    venue = await get_venue(venue_id)
+    
+    if not venue:
+        await callback.message.edit_text(
+            "Venue not found. Please try again or enter a custom venue."
+        )
+        return
+    
+    # Save venue details to state
+    await state.update_data(venue=venue['name'], venue_address=venue['address'])
+    
+    # Get all data from state
+    data = await state.get_data()
+    
+    # Get city for confirmation
+    city = await get_city(data['city_id'])
+    
+    # Format confirmation message
+    confirmation = (
+        f"Please confirm the group details:\n\n"
+        f"Name: {data['group_name']}\n"
+        f"Date: {data['meeting_date'].strftime('%d.%m.%Y')}\n"
+        f"Time: {data['meeting_time'].strftime('%H:%M')}\n"
+        f"City: {city['name']}\n"
+        f"Venue: {data['venue']}\n"
+        f"Address: {data['venue_address']}\n\n"
+        f"Is this correct?"
+    )
+    
+    # Create confirmation keyboard
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Confirm Group"), KeyboardButton(text="Cancel")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await callback.message.edit_text(confirmation)
+    await callback.message.answer("Please confirm:", reply_markup=keyboard)
+    
+    # Set state to wait for confirmation
+    await state.set_state(GroupManagementStates.confirm_group)
+
+# Process manual venue entry
+@router.message(GroupManagementStates.create_venue)
+async def process_venue(message: Message, state: FSMContext):
+    venue = message.text.strip()
+    
+    # Validate venue
+    if not venue:
+        await message.answer("Venue cannot be empty. Please try again:")
+        return
+    
+    # Save venue to state
+    await state.update_data(venue=venue, venue_address="")
+    
+    # Get all data from state
+    data = await state.get_data()
+    
+    # Get city for confirmation
+    city = await get_city(data['city_id'])
+    
+    # Format confirmation message
+    confirmation = (
+        f"Please confirm the group details:\n\n"
+        f"Name: {data['group_name']}\n"
+        f"Date: {data['meeting_date'].strftime('%d.%m.%Y')}\n"
+        f"Time: {data['meeting_time'].strftime('%H:%M')}\n"
+        f"City: {city['name']}\n"
+        f"Venue: {data['venue']}\n"
+        f"Address: {data.get('venue_address', '')}\n\n"
+        f"Is this correct?"
+    )
+    
+    # Create confirmation keyboard
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Confirm Group"), KeyboardButton(text="Cancel")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(confirmation, reply_markup=keyboard)
+    
+    # Set state to wait for confirmation
+    await state.set_state(GroupManagementStates.confirm_group)
+
+# Confirm group creation
+@router.message(GroupManagementStates.confirm_group, F.text == "Confirm Group")
+async def confirm_group_creation(message: Message, state: FSMContext):
+    # Get all data from state
+    data = await state.get_data()
+    
+    # Create group in database
+    try:
+        group_id = await create_group(
+            name=data['group_name'],
+            meeting_date=data['meeting_date'],
+            meeting_time=data['meeting_time'],
+            city_id=data['city_id'],
+            venue=data['venue'],
+            created_by=message.from_user.id,
+            venue_address=data.get('venue_address', '')
+        )
+        
+        # Create group management keyboard
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Add Members"), KeyboardButton(text="Back to Groups")]
+            ],
+            resize_keyboard=True
+        )
+        
+        await message.answer(
+            f"Group '{data['group_name']}' has been created successfully!\n\n"
+            f"Would you like to add members to this group now?",
+            reply_markup=keyboard
+        )
+        
+        # Save group ID to state
+        await state.update_data(group_id=group_id)
+        
+        # Set state to wait for add members decision
+        await state.set_state(GroupManagementStates.add_members)
+    except Exception as e:
+        await message.answer(
+            f"Failed to create group: {str(e)}"
+        )
+        
+        # Clear state
+        await state.clear()
+
+# Cancel group creation
+@router.message(GroupManagementStates.confirm_group, F.text == "Cancel")
+async def cancel_group_creation(message: Message, state: FSMContext):
+    # Create group management keyboard
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Create Group"), KeyboardButton(text="Manage Groups")],
+            [KeyboardButton(text="List Groups"), KeyboardButton(text="Back to Menu")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(
+        "Group creation cancelled.",
+        reply_markup=keyboard
+    )
+    
+    # Clear state
+    await state.clear()
+
+# List groups handler
+@router.message(F.text == "List Groups")
+async def list_groups(message: Message, state: FSMContext):
+    # Check if user is an admin
+    if not await is_admin(message.from_user.id):
+        return
+    
+    # Get groups from database
+    planned_groups = await get_groups_by_status("planned")
+    confirmed_groups = await get_groups_by_status("confirmed")
+    
+    if not planned_groups and not confirmed_groups:
+        await message.answer("There are no active groups in the database.")
+        return
+    
+    # Display groups
+    response = "Active Groups:\n\n"
+    
+    if planned_groups:
+        response += "Planned Groups:\n"
+        for i, group in enumerate(planned_groups, 1):
+            response += (
+                f"{i}. {group['name']} - {group['city_name']}\n"
+                f"   Date: {group['meeting_date'].strftime('%d.%m.%Y')} at {group['meeting_time'].strftime('%H:%M')}\n"
+                f"   Venue: {group['venue']}\n\n"
+            )
+    
+    if confirmed_groups:
+        response += "Confirmed Groups:\n"
+        for i, group in enumerate(confirmed_groups, 1):
+            response += (
+                f"{i}. {group['name']} - {group['city_name']}\n"
+                f"   Date: {group['meeting_date'].strftime('%d.%m.%Y')} at {group['meeting_time'].strftime('%H:%M')}\n"
+                f"   Venue: {group['venue']}\n\n"
+            )
+    
+    await message.answer(response)
+
+# Manage groups handler
+@router.message(F.text == "Manage Groups")
+async def manage_groups_command(message: Message, state: FSMContext):
+    # Check if user is an admin
+    if not await is_admin(message.from_user.id):
+        return
+    
+    # Get groups from database
+    planned_groups = await get_groups_by_status("planned")
+    confirmed_groups = await get_groups_by_status("confirmed")
+    
+    if not planned_groups and not confirmed_groups:
+        await message.answer("There are no active groups to manage.")
+        return
+    
+    # Create group selection keyboard
+    builder = InlineKeyboardBuilder()
+    
+    if planned_groups:
+        for group in planned_groups:
+            builder.add(InlineKeyboardButton(
+                text=f"🔄 {group['name']} - {group['meeting_date'].strftime('%d.%m.%Y')}",
+                callback_data=f"manage_group_{group['id']}"
+            ))
+    
+    if confirmed_groups:
+        for group in confirmed_groups:
+            builder.add(InlineKeyboardButton(
+                text=f"✅ {group['name']} - {group['meeting_date'].strftime('%d.%m.%Y')}",
+                callback_data=f"manage_group_{group['id']}"
+            ))
+    
+    builder.adjust(1)
+    
+    await message.answer(
+        "Select a group to manage:",
+        reply_markup=builder.as_markup()
+    )
+    
+    # Set state to wait for group selection
+    await state.set_state(GroupManagementStates.select_group)
+
+# Group selection handler
+@router.callback_query(F.data.startswith("manage_group_"))
+async def process_group_selection(callback: CallbackQuery, state: FSMContext):
+    # Extract group ID from callback data
+    group_id = int(callback.data.split("_")[2])
+    
+    # Save group ID to state
+    await state.update_data(group_id=group_id)
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await callback.message.edit_text("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Get group members
+    members = await get_group_members(group_id)
+    
+    # Format group details
+    details = (
+        f"Group: {group['name']}\n"
+        f"Date: {group['meeting_date'].strftime('%d.%m.%Y')} at {group['meeting_time'].strftime('%H:%M')}\n"
+        f"City: {group['city_name']}\n"
+        f"Venue: {group['venue']}\n"
+        f"Status: {group['status'].capitalize()}\n\n"
+        f"Members ({len(members)}/{MAX_GROUP_SIZE}):\n"
+    )
+    
+    if members:
+        for i, member in enumerate(members, 1):
+            details += f"{i}. {member['name']} {member['surname']}\n"
+    else:
+        details += "No members yet.\n"
+    
+    # Create management options keyboard
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="Add Members",
+        callback_data=f"add_members_{group_id}"
+    ))
+    
+    if members:
+        builder.add(InlineKeyboardButton(
+            text="Remove Members",
+            callback_data=f"remove_members_{group_id}"
+        ))
+    
+    if group['status'] == 'planned' and len(members) >= MIN_GROUP_SIZE:
+        builder.add(InlineKeyboardButton(
+            text="Confirm Group",
+            callback_data=f"confirm_group_{group_id}"
+        ))
+    
+    if group['status'] == 'confirmed':
+        builder.add(InlineKeyboardButton(
+            text="Cancel Group",
+            callback_data=f"cancel_group_{group_id}"
+        ))
+    
+    builder.add(InlineKeyboardButton(
+        text="Back",
+        callback_data="back_to_groups"
+    ))
+    
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        details,
+        reply_markup=builder.as_markup()
+    )
+
+# Add members handler
+@router.callback_query(F.data.startswith("add_members_"))
+async def add_members_command(callback: CallbackQuery, state: FSMContext):
+    # Extract group ID from callback data
+    group_id = int(callback.data.split("_")[2])
+    
+    # Save group ID to state
+    await state.update_data(group_id=group_id)
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await callback.message.edit_text("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Get current member count
+    current_count = await count_group_members(group_id)
+    
+    if current_count >= MAX_GROUP_SIZE:
+        await callback.message.edit_text(
+            f"This group already has the maximum number of members ({MAX_GROUP_SIZE})."
+        )
+        return
+    
+    # Get approved users who match the city and are not in any group
+    async with pool.acquire() as conn:
+        eligible_users = await conn.fetch('''
+            SELECT u.id, u.name, u.surname, u.username, a.id as application_id
+            FROM users u
+            JOIN applications a ON u.id = a.user_id
+            LEFT JOIN group_members gm ON u.id = gm.user_id
+            WHERE a.status = 'approved'
+            AND a.city_id = $1
+            AND gm.user_id IS NULL
+            ORDER BY u.name, u.surname
+        ''', group['city_id'])
+    
+    if not eligible_users:
+        await callback.message.edit_text(
+            "There are no eligible users to add to this group.\n\n"
+            "Eligible users are those who:\n"
+            "- Have approved applications\n"
+            "- Match the city of this group\n"
+            "- Are not already in a group"
+        )
+        return
+    
+    # Create user selection keyboard
+    builder = InlineKeyboardBuilder()
+    for user in eligible_users:
+        display_name = f"{user['name']} {user['surname']}"
+        if user['username']:
+            display_name += f" (@{user['username']})"
+        
+        builder.add(InlineKeyboardButton(
+            text=display_name,
+            callback_data=f"select_user_{user['id']}_{group_id}"
+        ))
+    
+    builder.add(InlineKeyboardButton(
+        text="Back",
+        callback_data=f"manage_group_{group_id}"
+    ))
+    
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        f"Select a user to add to group '{group['name']}':\n\n"
+        f"Current members: {current_count}/{MAX_GROUP_SIZE}",
+        reply_markup=builder.as_markup()
+    )
+    
+    # Set state to select user
+    await state.set_state(GroupManagementStates.select_user)
+
+# User selection handler
+@router.callback_query(F.data.startswith("select_user_"))
+async def select_user(callback: CallbackQuery, state: FSMContext):
+    # Extract user ID and group ID from callback data
+    parts = callback.data.split("_")
+    user_id = int(parts[2])
+    group_id = int(parts[3])
+    
+    # Get user details
+    user = await get_user(user_id)
+    
+    if not user:
+        await callback.message.edit_text("User not found. They may have been deleted.")
+        await state.clear()
+        return
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await callback.message.edit_text("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Add user to group
+    try:
+        await add_group_member(group_id, user_id)
+        
+        # Send notification to user
+        notification_service = NotificationService(callback.bot)
+        try:
+            # Use the application status update method with group_id
+            await notification_service.send_application_status_update(
+                user_id, "approved", None, group_id
+            )
+            logger.info(f"Sent group assignment notification to user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to send group assignment notification to user {user_id}: {e}")
+        
+        # Get updated member count
+        current_count = await count_group_members(group_id)
+        
+        # Create confirmation message
+        confirmation = (
+            f"User {user['name']} {user['surname']} has been added to group '{group['name']}'!\n\n"
+            f"Current members: {current_count}/{MAX_GROUP_SIZE}\n\n"
+            f"The user has been notified about their group assignment."
+        )
+        
+        # Create options keyboard
+        builder = InlineKeyboardBuilder()
+        
+        if current_count < MAX_GROUP_SIZE:
+            builder.add(InlineKeyboardButton(
+                text="Add Another Member",
+                callback_data=f"add_members_{group_id}"
+            ))
+        
+        builder.add(InlineKeyboardButton(
+            text="Back to Group",
+            callback_data=f"manage_group_{group_id}"
+        ))
+        
+        builder.adjust(1)
+        
+        await callback.message.edit_text(
+            confirmation,
+            reply_markup=builder.as_markup()
+        )
+        
+    except Exception as e:
+        await callback.message.edit_text(
+            f"Failed to add user to group: {str(e)}"
+        )
+        await state.clear()
+
+# Back to groups handler
+@router.callback_query(F.data == "back_to_groups")
+async def back_to_groups(callback: CallbackQuery, state: FSMContext):
+    # Create group management keyboard
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Create Group"), KeyboardButton(text="Manage Groups")],
+            [KeyboardButton(text="List Groups"), KeyboardButton(text="Back to Menu")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await callback.message.edit_text("Returning to group management.")
+    
+    await callback.message.answer(
+        "What would you like to do next?",
+        reply_markup=keyboard
+    )
+    
+    # Clear state
+    await state.clear()
+
+# Remove members handler
+@router.callback_query(F.data.startswith("remove_members_"))
+async def remove_members_command(callback: CallbackQuery, state: FSMContext):
+    # Extract group ID from callback data
+    group_id = int(callback.data.split("_")[2])
+    
+    # Save group ID to state
+    await state.update_data(group_id=group_id)
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await callback.message.edit_text("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Get group members
+    members = await get_group_members(group_id)
+    
+    if not members:
+        await callback.message.edit_text(
+            f"Group '{group['name']}' has no members to remove."
+        )
+        return
+    
+    # Create member selection keyboard
+    builder = InlineKeyboardBuilder()
+    for member in members:
+        display_name = f"{member['name']} {member['surname']}"
+        if member.get('username'):
+            display_name += f" (@{member['username']})"
+        
+        builder.add(InlineKeyboardButton(
+            text=display_name,
+            callback_data=f"remove_user_{member['user_id']}_{group_id}"
+        ))
+    
+    builder.add(InlineKeyboardButton(
+        text="Back",
+        callback_data=f"manage_group_{group_id}"
+    ))
+    
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        f"Select a member to remove from group '{group['name']}':",
+        reply_markup=builder.as_markup()
+    )
+    
+    # Set state to remove members
+    await state.set_state(GroupManagementStates.remove_members)
+
+# Remove user handler
+@router.callback_query(GroupManagementStates.remove_members, F.data.startswith("remove_user_"))
+async def remove_user(callback: CallbackQuery, state: FSMContext):
+    # Extract user ID and group ID from callback data
+    parts = callback.data.split("_")
+    user_id = int(parts[2])
+    group_id = int(parts[3])
+    
+    # Get user details
+    user = await get_user(user_id)
+    
+    if not user:
+        await callback.message.edit_text("User not found. They may have been deleted.")
+        await state.clear()
+        return
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await callback.message.edit_text("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Remove user from group
+    try:
+        await remove_group_member(group_id, user_id)
+        
+        # Get updated member count
+        current_count = await count_group_members(group_id)
+        
+        # Create confirmation message
+        confirmation = (
+            f"User {user['name']} {user['surname']} has been removed from group '{group['name']}'!\n\n"
+            f"Current members: {current_count}/{MAX_GROUP_SIZE}"
+        )
+        
+        # Create options keyboard
+        builder = InlineKeyboardBuilder()
+        
+        builder.add(InlineKeyboardButton(
+            text="Remove Another Member",
+            callback_data=f"remove_members_{group_id}"
+        ))
+        
+        builder.add(InlineKeyboardButton(
+            text="Back to Group",
+            callback_data=f"manage_group_{group_id}"
+        ))
+        
+        builder.adjust(1)
+        
+        await callback.message.edit_text(
+            confirmation,
+            reply_markup=builder.as_markup()
+        )
+        
+        # Send notification to user about removal
+        notification_service = NotificationService(callback.bot)
+        try:
+            await notification_service.send_message(
+                user_id,
+                f"You have been removed from the group '{group['name']}'. "
+                f"If you have any questions, please contact the administrator."
+            )
+            logger.info(f"Sent removal notification to user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to send removal notification to user {user_id}: {e}")
+        
+    except Exception as e:
+        await callback.message.edit_text(
+            f"Failed to remove user from group: {str(e)}"
+        )
+        await state.clear()
+
+# Confirm group handler
+@router.callback_query(F.data.startswith("confirm_group_"))
+async def confirm_group(callback: CallbackQuery, state: FSMContext):
+    # Extract group ID from callback data
+    group_id = int(callback.data.split("_")[2])
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await callback.message.edit_text("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Get group members
+    members = await get_group_members(group_id)
+    
+    if len(members) < MIN_GROUP_SIZE:
+        await callback.message.edit_text(
+            f"This group needs at least {MIN_GROUP_SIZE} members to be confirmed. "
+            f"It currently has {len(members)} members."
+        )
+        return
+    
+    # Update group status
+    await update_group_status(group_id, "confirmed")
+    
+    # Send notifications to all members
+    notification_service = NotificationService(callback.bot)
+    for member in members:
+        await notification_service.send_group_invitation(member['user_id'], group)
+    
+    # Create group management keyboard
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Create Group"), KeyboardButton(text="Manage Groups")],
+            [KeyboardButton(text="List Groups"), KeyboardButton(text="Back to Menu")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await callback.message.edit_text(
+        f"Group '{group['name']}' has been confirmed! "
+        f"All {len(members)} members have been notified."
+    )
+    
+    await callback.message.answer(
+        "What would you like to do next?",
+        reply_markup=keyboard
+    )
+    
+    # Clear state
+    await state.clear()
+
+# Cancel group handler
+@router.callback_query(F.data.startswith("cancel_group_"))
+async def cancel_group(callback: CallbackQuery, state: FSMContext):
+    # Extract group ID from callback data
+    group_id = int(callback.data.split("_")[2])
+    
+    # Save group ID to state
+    await state.update_data(group_id=group_id)
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await callback.message.edit_text("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Create confirmation keyboard
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="Yes, Cancel Group",
+        callback_data=f"confirm_cancel_{group_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="No, Keep Group",
+        callback_data=f"keep_group_{group_id}"
+    ))
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        f"Are you sure you want to cancel the group '{group['name']}'?\n\n"
+        f"This will notify all members that the meeting is cancelled.",
+        reply_markup=builder.as_markup()
+    )
+    
+    # Set state to confirm cancellation
+    await state.set_state(GroupManagementStates.cancel_group)
+
+# Confirm group cancellation
+@router.callback_query(GroupManagementStates.cancel_group, F.data.startswith("confirm_cancel_"))
+async def confirm_cancel_group(callback: CallbackQuery, state: FSMContext):
+    # Extract group ID from callback data
+    group_id = int(callback.data.split("_")[2])
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await callback.message.edit_text("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Get group members
+    members = await get_group_members(group_id)
+    
+    # Update group status
+    await update_group_status(group_id, "cancelled")
+    
+    # Send notifications to all members
+    notification_service = NotificationService(callback.bot)
+    for member in members:
+        await notification_service.send_group_cancellation(member['user_id'], group)
+    
+    # Create group management keyboard
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Create Group"), KeyboardButton(text="Manage Groups")],
+            [KeyboardButton(text="List Groups"), KeyboardButton(text="Back to Menu")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await callback.message.edit_text(
+        f"Group '{group['name']}' has been cancelled! "
+        f"All {len(members)} members have been notified."
+    )
+    
+    await callback.message.answer(
+        "What would you like to do next?",
+        reply_markup=keyboard
+    )
+    
+    # Clear state
+    await state.clear()
+
+# Keep group handler
+@router.callback_query(GroupManagementStates.cancel_group, F.data.startswith("keep_group_"))
+async def keep_group(callback: CallbackQuery, state: FSMContext):
+    # Extract group ID from callback data
+    group_id = int(callback.data.split("_")[2])
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await callback.message.edit_text("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Get group members
+    members = await get_group_members(group_id)
+    
+    # Format group details
+    details = (
+        f"Group: {group['name']}\n"
+        f"Date: {group['meeting_date'].strftime('%d.%m.%Y')} at {group['meeting_time'].strftime('%H:%M')}\n"
+        f"City: {group['city_name']}\n"
+        f"Venue: {group['venue']}\n"
+        f"Status: {group['status'].capitalize()}\n\n"
+        f"Members ({len(members)}/{MAX_GROUP_SIZE}):\n"
+    )
+    
+    if members:
+        for i, member in enumerate(members, 1):
+            details += f"{i}. {member['name']} {member['surname']}\n"
+    else:
+        details += "No members yet.\n"
+    
+    # Create management options keyboard
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="Add Members",
+        callback_data=f"add_members_{group_id}"
+    ))
+    
+    if members:
+        builder.add(InlineKeyboardButton(
+            text="Remove Members",
+            callback_data=f"remove_members_{group_id}"
+        ))
+    
+    if group['status'] == 'planned' and len(members) >= MIN_GROUP_SIZE:
+        builder.add(InlineKeyboardButton(
+            text="Confirm Group",
+            callback_data=f"confirm_group_{group_id}"
+        ))
+    
+    if group['status'] == 'confirmed':
+        builder.add(InlineKeyboardButton(
+            text="Cancel Group",
+            callback_data=f"cancel_group_{group_id}"
+        ))
+    
+    builder.add(InlineKeyboardButton(
+        text="Back",
+        callback_data="back_to_groups"
+    ))
+    
+    builder.adjust(1)
+    
+    await callback.message.edit_text(
+        details,
+        reply_markup=builder.as_markup()
+    )
+    
+    # Clear cancel state
+    await state.set_state(GroupManagementStates.select_group)
+
+# Back to menu handler
+@router.message(F.text == "Back to Menu")
+async def back_to_menu(message: Message, state: FSMContext):
+    # Check if user is an admin
+    if not await is_admin(message.from_user.id):
+        return
+    
+    # Create admin keyboard
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="/cities"), KeyboardButton(text="/timeslots")],
+            [KeyboardButton(text="/questions"), KeyboardButton(text="/applications")],
+            [KeyboardButton(text="/groups"), KeyboardButton(text="/help")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(
+        "Main Menu",
+        reply_markup=keyboard
+    )
+    
+    # Clear state
+    await state.clear()
+
+# Add Members handler
+@router.message(F.text == "Add Members")
+async def add_members_handler(message: Message, state: FSMContext):
+    # Get group ID from state
+    data = await state.get_data()
+    group_id = data.get('group_id')
+    
+    if not group_id:
+        await message.answer("Group ID not found. Please try again.")
+        await state.clear()
+        return
+    
+    # Get group details
+    group = await get_group(group_id)
+    
+    if not group:
+        await message.answer("Group not found. It may have been deleted.")
+        await state.clear()
+        return
+    
+    # Get current member count
+    current_count = await count_group_members(group_id)
+    
+    if current_count >= MAX_GROUP_SIZE:
+        await message.answer(
+            f"This group already has the maximum number of members ({MAX_GROUP_SIZE})."
+        )
+        return
+    
+    # Get approved users who match the city and are not in any group
+    async with pool.acquire() as conn:
+        eligible_users = await conn.fetch('''
+            SELECT u.id, u.name, u.surname, u.username, a.id as application_id
+            FROM users u
+            JOIN applications a ON u.id = a.user_id
+            LEFT JOIN group_members gm ON u.id = gm.user_id
+            WHERE a.status = 'approved'
+            AND a.city_id = $1
+            AND gm.user_id IS NULL
+            ORDER BY u.name, u.surname
+        ''', group['city_id'])
+    
+    if not eligible_users:
+        await message.answer(
+            "There are no eligible users to add to this group.\n\n"
+            "Eligible users are those who:\n"
+            "- Have approved applications\n"
+            "- Match the city of this group\n"
+            "- Are not already in a group"
+        )
+        return
+    
+    # Create user selection keyboard
+    builder = InlineKeyboardBuilder()
+    for user in eligible_users:
+        display_name = f"{user['name']} {user['surname']}"
+        if user['username']:
+            display_name += f" (@{user['username']})"
+        
+        builder.add(InlineKeyboardButton(
+            text=display_name,
+            callback_data=f"select_user_{user['id']}_{group_id}"
+        ))
+    
+    builder.add(InlineKeyboardButton(
+        text="Back",
+        callback_data=f"manage_group_{group_id}"
+    ))
+    
+    builder.adjust(1)
+    
+    await message.answer(
+        f"Select a user to add to group '{group['name']}':\n\n"
+        f"Current members: {current_count}/{MAX_GROUP_SIZE}",
+        reply_markup=builder.as_markup()
+    )
+    
+    # Set state to select user
+    await state.set_state(GroupManagementStates.select_user)
+
+# Back to Groups handler
+@router.message(F.text == "Back to Groups")
+async def back_to_groups_handler(message: Message, state: FSMContext):
+    # Create group management keyboard
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Create Group"), KeyboardButton(text="Manage Groups")],
+            [KeyboardButton(text="List Groups"), KeyboardButton(text="Back to Menu")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(
+        "Returning to group management.",
+        reply_markup=keyboard
+    )
+    
+    # Clear state
+    await state.clear()
+
+# Function to register handlers with the dispatcher
+def register_groups_handlers(dp):
+    dp.include_router(router)

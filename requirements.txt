@@ -1,0 +1,17 @@
+# Core dependencies
+aiogram>=3.0.0
+python-dotenv>=1.0.0
+asyncpg>=0.27.0
+sqlalchemy>=2.0.0
+alembic>=1.10.0
+
+# Async support
+aiohttp>=3.8.0
+asyncio>=3.4.3
+greenlet>=2.0.0  # Required for SQLAlchemy async
+
+# Date and time handling
+python-dateutil>=2.8.2
+
+# Utilities
+pydantic>=2.0.0
