@@ -16,8 +16,7 @@ from database.db import (
     get_active_cities, get_city, add_meeting_member, remove_meeting_member,
     get_meeting_members, count_meeting_members, get_user, pool, get_venues_by_city, get_venue,
     get_available_dates, get_available_date, update_available_date, get_available_dates_with_users_count,
-    get_users_by_time_preference, get_compatible_users_for_meeting, create_meeting_from_available_date,
-    get_pending_applications_by_timeslot
+    get_users_by_time_preference, get_compatible_users_for_meeting, create_meeting_from_available_date
 )
 from config import MIN_MEETING_SIZE, MAX_MEETING_SIZE
 from services.notification_service import NotificationService
@@ -765,7 +764,7 @@ async def continue_smart_meeting_after_venue(msg_obj, state: FSMContext):
         time_slot_id = slot_row['id']
     await state.update_data(time_slot_id=time_slot_id)
     # --- Получаем аппликантов ---
-    applicants = await get_pending_applications_by_timeslot(city_id, time_slot_id)
+    applicants = await get_applicants_for_meeting(time_slot_id, 0)
     if not applicants:
         await msg_obj.answer("Нет подходящих аппликантов для этой встречи.")
         return
@@ -775,7 +774,7 @@ async def continue_smart_meeting_after_venue(msg_obj, state: FSMContext):
     builder = InlineKeyboardBuilder()
     for a in applicants:
         builder.add(InlineKeyboardButton(
-            text=f"{a['user_name']} (@{a['user_username'] or '-'}), {a['user_age']}",
+            text=f"{a['name']} (@{a['username'] or '-'}), {a['age']}",
             callback_data=f"smart_view_user_{a['user_id']}"
         ))
     builder.add(InlineKeyboardButton(
@@ -794,38 +793,12 @@ async def continue_smart_meeting_after_venue(msg_obj, state: FSMContext):
     await state.set_state(MeetingManagementStates.smart_select_users)
 
 # --- Smart Meeting Creation: просмотр профиля кандидата ---
+# Этот обработчик обязателен для корректной работы smart режима!
 @router.callback_query(MeetingManagementStates.smart_select_users, F.data.startswith("smart_view_user_"))
 async def smart_view_user(callback: CallbackQuery, state: FSMContext):
     user_id = int(callback.data.split("_")[-1])
     data = await state.get_data()
-    selected = data.get("smart_selected_users", [])
-    is_selected = user_id in selected
-    await show_applicant_profile(
-        callback, 0, user_id,
-        "selected" if is_selected else None,
-        "back_to_smart_candidates",
-        state
-    )
-
-# --- Smart Meeting Creation: добавить пользователя в выбранные ---
-@router.callback_query(MeetingManagementStates.smart_select_users, F.data.startswith("smart_add_user_"))
-async def smart_add_user(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split("_")[-1])
-    data = await state.get_data()
-    selected = set(data.get("smart_selected_users", []))
-    selected.add(user_id)
-    await state.update_data(smart_selected_users=list(selected))
-    await smart_view_user(callback, state)
-
-# --- Smart Meeting Creation: убрать пользователя из выбранных ---
-@router.callback_query(MeetingManagementStates.smart_select_users, F.data.startswith("smart_remove_user_"))
-async def smart_remove_user(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split("_")[-1])
-    data = await state.get_data()
-    selected = set(data.get("smart_selected_users", []))
-    selected.discard(user_id)
-    await state.update_data(smart_selected_users=list(selected))
-    await smart_view_user(callback, state)
+    await show_applicant_profile(callback, 0, user_id, None, None, state)
 
 # === DEBUG ОБРАБОТЧИК ДЛЯ ВСЕХ CALLBACK_QUERY ===
 # Временно отключён для корректной работы основных обработчиков
@@ -1237,54 +1210,76 @@ async def delete_meeting_confirmed(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text("Встреча успешно удалена! Все связанные заявки возвращены в статус 'необработанные'.")
     await state.clear()
 
-async def show_applicant_profile(
-    callback: CallbackQuery,
-    meeting_id: int,
-    user_id: int,
-    status: str = None,
-    return_callback: str = None,
-    state: FSMContext = None,
-    show_return_button: bool = False
-):
-    logger.warning(f"[show_applicant_profile] meeting_id={meeting_id}, user_id={user_id}, status={status}, return_callback={return_callback}, show_return_button={show_return_button}")
-    user = await get_user(user_id)
-    if not user:
-        await callback.message.edit_text("Пользователь не найден.")
+@router.callback_query(F.data.startswith("members_meeting_"))
+async def show_meeting_members(callback: CallbackQuery, state: FSMContext):
+    meeting_id = int(callback.data.split("_")[-1])
+    data = await state.get_data()
+    city_id = data.get('city_id')
+    # Получаем участников встречи
+    async with pool.acquire() as conn:
+        members = await conn.fetch('''
+            SELECT u.id, u.name, u.surname, u.username, u.age
+            FROM meeting_members mm
+            JOIN users u ON mm.user_id = u.id
+            WHERE mm.meeting_id = $1
+            ORDER BY mm.added_at
+        ''', meeting_id)
+    text = f"<b>Участники встречи</b> (всего {len(members)}):\n"
+    builder = InlineKeyboardBuilder()
+    for i, member in enumerate(members, 1):
+        text += f"{i}. {member['name']} {member['surname']} (@{member['username'] or '-'}), {member['age']} лет\n"
+        builder.add(InlineKeyboardButton(
+            text=f"{member['name']} {member['surname']}",
+            callback_data=f"view_member_{meeting_id}_{member['id']}"
+        ))
+    builder.add(InlineKeyboardButton(
+        text="Назад к встрече",
+        callback_data=f"manage_meeting_{meeting_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="Назад к списку встреч",
+        callback_data=f"list_meetings_city_{city_id}"
+    ))
+    builder.adjust(1)
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+async def show_applicant_profile(callback, meeting_id, user_id, status, back_callback, state, show_return_button=False):
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+        meeting = await conn.fetchrow('SELECT * FROM meetings WHERE id = $1', meeting_id)
+    if not user or not meeting:
+        await callback.message.edit_text("Пользователь или встреча не найдены.")
         return
     text = (
-        f"<b>Профиль пользователя</b>\n"
+        f"<b>Профиль участника</b>\n"
         f"Имя: {user['name']} {user['surname']}\n"
-        f"Username: @{user['username'] or '-'}\n"
         f"Возраст: {user['age']}\n"
-        f"Статус: {user.get('status', '-')}\n"
+        f"Username: @{user['username'] or '-'}\n"
+        f"Встреча: {meeting['name']}\n"
     )
     builder = InlineKeyboardBuilder()
-    # Smart-режим: кнопки для выбора/отмены выбора
-    if meeting_id == 0:
-        selected = []
-        if state:
-            data = await state.get_data()
-            selected = data.get("smart_selected_users", [])
-        if user_id in selected:
-            builder.add(InlineKeyboardButton(
-                text="Убрать из выбранных",
-                callback_data=f"smart_remove_user_{user_id}"
-            ))
-        else:
-            builder.add(InlineKeyboardButton(
-                text="Добавить в выбранные",
-                callback_data=f"smart_add_user_{user_id}"
-            ))
-    # Для обычных встреч (meeting_id != 0) временно только кнопка 'Назад'
-    if return_callback:
+    if show_return_button:
+        builder.add(InlineKeyboardButton(
+            text="Вернуть пользователя",
+            callback_data=f"confirm_add_{meeting_id}_{user_id}"
+        ))
+    else:
+        builder.add(InlineKeyboardButton(
+            text="Удалить из встречи",
+            callback_data=f"remove_member_{meeting_id}_{user_id}"
+        ))
+        builder.add(InlineKeyboardButton(
+            text="Переместить в другую встречу",
+            callback_data=f"move_member_{meeting_id}_{user_id}"
+        ))
+    builder.add(InlineKeyboardButton(
+        text="Назад к участникам",
+        callback_data=f"members_meeting_{meeting_id}"
+    ))
+    if back_callback:
         builder.add(InlineKeyboardButton(
             text="Назад",
-            callback_data=return_callback
+            callback_data=back_callback
         ))
     builder.adjust(1)
-    logger.warning(f"[show_applicant_profile] Кнопок: {len(builder.buttons)}")
-    await callback.message.edit_text(
-        text,
-        reply_markup=builder.as_markup(),
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
