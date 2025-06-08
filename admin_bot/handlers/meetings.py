@@ -299,8 +299,7 @@ async def process_venue_selection(callback: CallbackQuery, state: FSMContext):
     venue_id = int(venue_data)
     venue = await get_venue(venue_id)
     if not venue:
-        await callback.message.edit_text(
-            "Площадка не найдена. Попробуйте ещё раз или введите вручную.")
+        await callback.message.edit_text("Площадка не найдена. Попробуйте ещё раз или введите вручную.")
         return
     await state.update_data(venue=venue['name'], venue_address=venue['address'], venue_id=venue_id)
     data = await state.get_data()
@@ -323,7 +322,7 @@ async def process_venue_selection(callback: CallbackQuery, state: FSMContext):
     )
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Add Members"), KeyboardButton(text="Back to Meetings")]
+            # ...
         ],
         resize_keyboard=True
     )
@@ -772,12 +771,15 @@ async def continue_smart_meeting_after_venue(msg_obj, state: FSMContext):
         await msg_obj.answer("Нет подходящих аппликантов для этой встречи.")
         return
     user_ids = [a['user_id'] for a in applicants]
-    await state.update_data(smart_applicants=user_ids, smart_selected_users=[])
+    smart_selected = data.get('smart_selected_users', []) if data else []
+    await state.update_data(smart_applicants=user_ids)
     # Показываем список пользователей
     builder = InlineKeyboardBuilder()
     for a in applicants:
+        is_selected = a['user_id'] in smart_selected
+        check = '✅ ' if is_selected else ''
         builder.add(InlineKeyboardButton(
-            text=f"{a['user_name']} (@{a['user_username'] or '-'}), {a['user_age']}",
+            text=f"{check}{a['user_name']} (@{a['user_username'] or '-'}), {a['user_age']}",
             callback_data=f"smart_view_user_{a['user_id']}"
         ))
     builder.add(InlineKeyboardButton(
@@ -797,11 +799,67 @@ async def continue_smart_meeting_after_venue(msg_obj, state: FSMContext):
 
 # --- Smart Meeting Creation: просмотр профиля кандидата ---
 # Этот обработчик обязателен для корректной работы smart режима!
-@router.callback_query(MeetingManagementStates.smart_select_users, F.data.startswith("smart_view_user_"))
-async def smart_view_user(callback: CallbackQuery, state: FSMContext):
-    user_id = int(callback.data.split("_")[-1])
+@router.callback_query(MeetingManagementStates.smart_select_users, F.data.startswith("smart_"))
+async def smart_profile_action(callback: CallbackQuery, state: FSMContext):
+    if callback.data == "smart_confirm_creation":
+        await smart_confirm_creation(callback, state)
+        return
     data = await state.get_data()
-    await show_applicant_profile(callback, 0, user_id, None, None, state)
+    parts = callback.data.split("_")
+    action = "_".join(parts[1:-1])
+    user_id = int(parts[-1]) if parts[-1].isdigit() else None
+    smart_selected = data.get('smart_selected_users', [])
+    if action == "view_user":
+        await show_applicant_profile(callback, 0, user_id, None, None, state)
+        return
+    if action == "add_user":
+        if user_id not in smart_selected:
+            smart_selected.append(user_id)
+            await state.update_data(smart_selected_users=smart_selected)
+        await callback.answer("Пользователь добавлен в список!")
+        await show_applicant_profile(callback, 0, user_id, None, None, state)
+    elif action == "remove_user":
+        if user_id in smart_selected:
+            smart_selected.remove(user_id)
+            await state.update_data(smart_selected_users=smart_selected)
+        await callback.answer("Пользователь удалён из списка!")
+        await show_applicant_profile(callback, 0, user_id, None, None, state)
+    elif action == "approve_user":
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET status = $1 WHERE id = $2', 'approved', user_id)
+        await callback.answer("Пользователь одобрен!")
+        await show_applicant_profile(callback, 0, user_id, None, None, state)
+    elif callback.data.startswith("smart_reject_confirm_"):
+        # Подтверждение отклонения
+        builder = InlineKeyboardBuilder()
+        builder.add(InlineKeyboardButton(
+            text="Да, отклонить",
+            callback_data=f"smart_reject_user_{user_id}"
+        ))
+        builder.add(InlineKeyboardButton(
+            text="Нет, отмена",
+            callback_data=f"smart_view_user_{user_id}"
+        ))
+        await callback.message.edit_text(
+            "Вы уверены, что хотите отклонить пользователя?",
+            reply_markup=builder.as_markup()
+        )
+    elif action == "reject_user":
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET status = $1 WHERE id = $2', 'rejected', user_id)
+        await callback.answer("Пользователь не прошел проверку!")
+        # Показываем меню с кнопками вернуть/назад
+        await show_applicant_profile(callback, 0, user_id, None, None, state)
+    elif action == "restore_user":
+        async with pool.acquire() as conn:
+            await conn.execute('UPDATE users SET status = $1 WHERE id = $2', 'registered', user_id)
+        await callback.answer("Пользователь восстановлен!")
+        await show_applicant_profile(callback, 0, user_id, None, None, state)
+    elif callback.data == "smart_back_to_list":
+        # Возвращаем к списку кандидатов (повторно вызываем continue_smart_meeting_after_venue)
+        await continue_smart_meeting_after_venue(callback.message, state)
+    else:
+        await callback.answer("Действие не распознано.")
 
 # === DEBUG ОБРАБОТЧИК ДЛЯ ВСЕХ CALLBACK_QUERY ===
 # Временно отключён для корректной работы основных обработчиков
@@ -1249,7 +1307,7 @@ async def show_meeting_members(callback: CallbackQuery, state: FSMContext):
 # --- Новый универсальный вызов профиля ---
 async def show_applicant_profile(callback, meeting_id, user_id, status, back_callback, state, show_return_button=False):
     if not meeting_id:
-        await show_applicant_profile_for_smart(callback, user_id, back_callback)
+        await show_applicant_profile_for_smart(callback, user_id, back_callback, state)
     else:
         await show_applicant_profile_for_meeting(callback, meeting_id, user_id, status, back_callback, state, show_return_button)
 
@@ -1296,12 +1354,21 @@ async def show_applicant_profile_for_meeting(callback, meeting_id, user_id, stat
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
 # --- Профиль для smart meeting creation ---
-async def show_applicant_profile_for_smart(callback, user_id, back_callback):
+async def show_applicant_profile_for_smart(callback, user_id, back_callback, state):
     async with pool.acquire() as conn:
         user = await conn.fetchrow('SELECT * FROM users WHERE id = $1', user_id)
+        answers = await conn.fetch('''
+            SELECT q.text, a.answer
+            FROM user_answers a
+            JOIN questions q ON a.question_id = q.id
+            WHERE a.user_id = $1
+            ORDER BY q.id
+        ''', user_id)
     if not user:
         await callback.message.edit_text("Пользователь не найден.")
         return
+    data = await state.get_data()
+    smart_selected = data.get('smart_selected_users', []) if data else []
     text = (
         f"<b>Профиль участника</b>\n"
         f"Имя: {user['name']} {user['surname']}\n"
@@ -1309,9 +1376,47 @@ async def show_applicant_profile_for_smart(callback, user_id, back_callback):
         f"Username: @{user['username'] or '-'}\n"
     )
     builder = InlineKeyboardBuilder()
-    builder.add(InlineKeyboardButton(
-        text="Назад",
-        callback_data=back_callback or "cancel_smart_meeting"
-    ))
+    if user['status'] == 'rejected':
+        text += "\n❌ Пользователь отклонён и не может пользоваться ботом."
+        builder.add(InlineKeyboardButton(
+            text="Вернуть пользователя",
+            callback_data=f"smart_restore_user_{user_id}"
+        ))
+        builder.add(InlineKeyboardButton(
+            text="Назад к списку",
+            callback_data="smart_back_to_list"
+        ))
+    elif user['status'] != 'approved':
+        text += "\n<b>Ответы на вопросы:</b>\n"
+        for ans in answers:
+            text += f"<b>{ans['text']}</b>\n{ans['answer']}\n\n"
+        builder.add(InlineKeyboardButton(
+            text="Одобрить",
+            callback_data=f"smart_approve_user_{user_id}"
+        ))
+        builder.add(InlineKeyboardButton(
+            text="Отклонить (бан)",
+            callback_data=f"smart_reject_confirm_{user_id}"
+        ))
+        builder.add(InlineKeyboardButton(
+            text="Назад к списку",
+            callback_data="smart_back_to_list"
+        ))
+    else:
+        if user_id in smart_selected:
+            text += "\n✅ В списке на добавление"
+            builder.add(InlineKeyboardButton(
+                text="Удалить из списка",
+                callback_data=f"smart_remove_user_{user_id}"
+            ))
+        else:
+            builder.add(InlineKeyboardButton(
+                text="Добавить в список",
+                callback_data=f"smart_add_user_{user_id}"
+            ))
+        builder.add(InlineKeyboardButton(
+            text="Назад к списку",
+            callback_data="smart_back_to_list"
+        ))
     builder.adjust(1)
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")

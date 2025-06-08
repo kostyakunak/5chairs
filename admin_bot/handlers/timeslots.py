@@ -602,6 +602,7 @@ def get_timeslot_list_text_and_keyboard(timeslots):
             callback_data=f"toggle_slot_{slot['id']}"
         ))
     builder.add(InlineKeyboardButton(text="Back", callback_data="back_to_timeslot_management"))
+    builder.adjust(1)  # Одна кнопка в строке
     return text, builder.as_markup()
 
 # --- ОБНОВЛЁННЫЙ ОБРАБОТЧИК АКТИВАЦИИ/ДЕАКТИВАЦИИ ---

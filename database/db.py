@@ -891,7 +891,7 @@ async def get_pending_applications_by_city(city_id):
             JOIN users u ON a.user_id = u.id
             JOIN time_slots ts ON a.time_slot_id = ts.id
             JOIN cities c ON ts.city_id = c.id
-            WHERE ts.city_id = $1 AND a.status = 'pending' AND u.status != 'rejected'
+            WHERE ts.city_id = $1 AND a.status = 'pending' AND u.status != 'rejected' AND u.status != 'banned'
             ORDER BY a.created_at
         ''', city_id)
         return [dict(row) for row in rows]

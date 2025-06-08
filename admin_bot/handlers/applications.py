@@ -82,8 +82,16 @@ async def applications_by_oldest(message: Message, state: FSMContext):
     applications = sorted(applications, key=lambda x: x['created_at'])
     builder = InlineKeyboardBuilder()
     for app in applications:
+        # Формируем текст кнопки
+        parts = []
+        if app.get('created_at'):
+            parts.append(app['created_at'].strftime('%d.%m.%Y'))
+        if app.get('note'):
+            parts.append(f"[{app['note'][:20]}]")
+        parts.append(f"{app['user_name']} {app['user_surname']} - {app['city_name']} {app['day_of_week']} {app['time'].strftime('%H:%M')}")
+        btn_text = ' | '.join(parts)
         builder.add(InlineKeyboardButton(
-            text=f"👤 {app['user_name']} {app['user_surname']} - {app['city_name']} {app['day_of_week']} {app['time'].strftime('%H:%M')}",
+            text=btn_text,
             callback_data=f"review_app_{app['id']}"
         ))
     builder.adjust(1)
@@ -142,8 +150,15 @@ async def show_applications_for_slot(callback: CallbackQuery, state: FSMContext)
     filtered = sorted(filtered, key=lambda x: x['created_at'])
     builder = InlineKeyboardBuilder()
     for app in filtered:
+        parts = []
+        if app.get('created_at'):
+            parts.append(app['created_at'].strftime('%d.%m.%Y'))
+        if app.get('note'):
+            parts.append(f"[{app['note'][:20]}]")
+        parts.append(f"{app['user_name']} {app['user_surname']} - {app['city_name']} {app['day_of_week']} {app['time'].strftime('%H:%M')}")
+        btn_text = ' | '.join(parts)
         builder.add(InlineKeyboardButton(
-            text=f"👤 {app['user_name']} {app['user_surname']} - {app['city_name']}",
+            text=btn_text,
             callback_data=f"review_app_{app['id']}"
         ))
     builder.adjust(1)
@@ -178,7 +193,7 @@ async def review_applications_command(message: Message, state: FSMContext):
         builder = InlineKeyboardBuilder()
         for app in applications:
             builder.add(InlineKeyboardButton(
-                text=f"👤 {app['user_name']} {app['user_surname']} - {app['city_name']} {app['day_of_week']} {app['time'].strftime('%H:%M')}",
+                text=f"👤 {app['user_name']} {app['user_surname']}",
                 callback_data=f"review_app_{app['id']}"
             ))
         for key, group in grouped_apps.items():
@@ -251,11 +266,15 @@ async def process_application_selection(callback: CallbackQuery, state: FSMConte
             await state.set_state(ApplicationReviewStates.review_application)
             return
         logger.info(f"[process_application_selection] Второй этап модерации для user_id={user['id']}, status={user['status']}")
-        details = (
-            f"Заявка от {user['name']} {user['surname']}\n"
+        details = ""
+        if application.get('note'):
+            details += f" [{application['note']}]\n"
+        if application.get('created_at'):
+            details += f"Дата подачи заявки: {application['created_at'].strftime('%d.%m.%Y')}\n"
+        details += (
+            f"{user['name']} {user['surname']}\n"
             f"Username: @{user['username'] or 'None'}\n"
             f"Возраст: {user['age']}\n"
-            f"Дата регистрации: {user['registration_date'].strftime('%d.%m.%Y')}\n\n"
             f"Город: {application['city_name']}\n"
             f"Временной слот: {application['day_of_week']} {application['time'].strftime('%H:%M')}\n\n"
             f"Ответы на вопросы:\n"
@@ -263,21 +282,20 @@ async def process_application_selection(callback: CallbackQuery, state: FSMConte
         for i, answer in enumerate(answers, 1):
             details += f"{i}. {answer['question_text']}\n   Ответ: {answer['answer']}\n\n"
         builder = InlineKeyboardBuilder()
-        # Вместо генерации множества кнопок — одна кнопка для выбора встречи
         builder.add(InlineKeyboardButton(
-            text="➕ Добавить в существующую встречу",
+            text="➕ В существующую встречу",
             callback_data=f"show_meetings_{app_id}"
         ))
         builder.add(InlineKeyboardButton(
-            text="➕ Одобрить и создать новую встречу",
+            text="➕ Новая встреча",
             callback_data=f"approve_and_create_{app_id}_{application['city_id']}"
         ))
         builder.add(InlineKeyboardButton(
-            text="❌ Отклонить заявку",
+            text="❌ Отклонить",
             callback_data=f"reject_app_{app_id}"
         ))
         builder.add(InlineKeyboardButton(
-            text="📝 Добавить заметку",
+            text="📝 Заметка",
             callback_data=f"add_notes_{app_id}"
         ))
         builder.add(InlineKeyboardButton(
@@ -554,18 +572,54 @@ async def process_admin_note(message: Message, state: FSMContext):
     app_id = data.get('application_id')
     await update_application_status(app_id, None, note)  # только заметка
     await message.answer("Заметка сохранена! Возвращаюсь к заявке...")
-    # Имитация callback для возврата к заявке
-    from aiogram.types import CallbackQuery as CQ
-    fake_callback = CQ(
-        id='admin_note_return',
-        from_user=message.from_user,
-        chat_instance=None,
-        message=message,
-        data=f"review_app_{app_id}",
-        inline_message_id=None
+    # Вместо fake_callback просто повторно показываем заявку
+    # Получаем заявку и пользователя
+    application = await get_application(app_id)
+    if not application:
+        await message.answer("Заявка не найдена. Возможно, она была удалена.")
+        await state.clear()
+        return
+    user = await get_user(application['user_id'])
+    if not user:
+        await message.answer("Пользователь не найден. Возможно, он был удалён.")
+        await state.clear()
+        return
+    answers = await get_user_answers(application['user_id'])
+    details = (
+        f"Заявка от {user['name']} {user['surname']}\n"
+        f"Username: @{user['username'] or 'None'}\n"
+        f"Возраст: {user['age']}\n"
+        f"Дата регистрации: {user['registration_date'].strftime('%d.%m.%Y')}\n\n"
+        f"Город: {application['city_name']}\n"
+        f"Временной слот: {application['day_of_week']} {application['time'].strftime('%H:%M')}\n\n"
+        f"Ответы на вопросы:\n"
     )
-    await state.set_state(ApplicationReviewStates.select_application)
-    await process_application_selection(fake_callback, state)
+    for i, answer in enumerate(answers, 1):
+        details += f"{i}. {answer['question_text']}\n   Ответ: {answer['answer']}\n\n"
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(
+        text="➕ В существующую встречу",
+        callback_data=f"show_meetings_{app_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="➕ Новая встреча",
+        callback_data=f"approve_and_create_{app_id}_{application['city_id']}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="❌ Отклонить",
+        callback_data=f"reject_app_{app_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="📝 Заметка",
+        callback_data=f"add_notes_{app_id}"
+    ))
+    builder.add(InlineKeyboardButton(
+        text="⬅️ Назад",
+        callback_data="back_to_applications"
+    ))
+    builder.adjust(1)
+    await message.answer(details, reply_markup=builder.as_markup())
+    await state.set_state(ApplicationReviewStates.review_application)
 
 # Обработчик для кнопки "Одобрить и добавить в существующую встречу"
 @router.callback_query(ApplicationReviewStates.review_application, F.data.startswith("approve_and_add_"))
