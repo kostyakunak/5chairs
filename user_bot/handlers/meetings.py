@@ -1,11 +1,11 @@
 from aiogram import Router, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import datetime, timedelta
 
-from database.db import get_user, get_user_meetings, get_meeting_members, get_meeting, pool
+from database.db import get_user, get_user_meetings, get_meeting_members, get_meeting, pool, remove_meeting_member
 
 # Create router
 router = Router()
@@ -192,3 +192,78 @@ async def back_to_meetings(callback, state: FSMContext):
     message = callback.message
     message.from_user = callback.from_user
     await cmd_meetings(message)
+
+# Показываем список встреч пользователя
+@router.message(Command("my_meetings"))
+async def cmd_my_meetings(message: Message):
+    user_id = message.from_user.id
+    meetings = await get_user_meetings(user_id)
+    if not meetings:
+        await message.answer("У вас пока нет встреч.")
+        return
+    text = "Ваши встречи:\n"
+    builder = InlineKeyboardBuilder()
+    for m in meetings:
+        text += f"\n{m['meeting_date'].strftime('%d.%m.%Y')} {m['meeting_time'].strftime('%H:%M')} — {m['city_name']} (id={m['id']})"
+        builder.add(InlineKeyboardButton(
+            text=f"Отменить встречу {m['id']}",
+            callback_data=f"cancel_meeting_{m['id']}"
+        ))
+    builder.adjust(1)
+    await message.answer(text, reply_markup=builder.as_markup())
+
+# Подтверждение отмены встречи
+@router.callback_query(F.data.startswith("cancel_meeting_"))
+async def confirm_cancel_meeting(callback: CallbackQuery, state: FSMContext):
+    meeting_id = int(callback.data.split("_")[-1])
+    await callback.message.edit_text(
+        f"Вы уверены, что хотите отменить участие во встрече id={meeting_id}?",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Да, выйти", callback_data=f"do_cancel_meeting_{meeting_id}"),
+                 InlineKeyboardButton(text="Нет", callback_data="cancel_cancel_meeting")]
+            ]
+        )
+    )
+
+# Обработка подтверждения отмены
+@router.callback_query(F.data.startswith("do_cancel_meeting_"))
+async def do_cancel_meeting(callback: CallbackQuery, state: FSMContext):
+    meeting_id = int(callback.data.split("_")[-1])
+    user_id = callback.from_user.id
+    await remove_meeting_member(meeting_id, user_id)
+    await callback.message.edit_text("Вы вышли из встречи.")
+    # Показываем обновлённый список встреч
+    meetings = await get_user_meetings(user_id)
+    if not meetings:
+        await callback.message.answer("У вас больше нет встреч.")
+        return
+    text = "Ваши встречи:\n"
+    builder = InlineKeyboardBuilder()
+    for m in meetings:
+        text += f"\n{m['meeting_date'].strftime('%d.%m.%Y')} {m['meeting_time'].strftime('%H:%M')} — {m['city_name']} (id={m['id']})"
+        builder.add(InlineKeyboardButton(
+            text=f"Отменить встречу {m['id']}",
+            callback_data=f"cancel_meeting_{m['id']}"
+        ))
+    builder.adjust(1)
+    await callback.message.answer(text, reply_markup=builder.as_markup())
+
+# Отмена отмены (оставить встречу)
+@router.callback_query(F.data == "cancel_cancel_meeting")
+async def cancel_cancel_meeting(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    meetings = await get_user_meetings(user_id)
+    if not meetings:
+        await callback.message.edit_text("У вас пока нет встреч.")
+        return
+    text = "Ваши встречи:\n"
+    builder = InlineKeyboardBuilder()
+    for m in meetings:
+        text += f"\n{m['meeting_date'].strftime('%d.%m.%Y')} {m['meeting_time'].strftime('%H:%M')} — {m['city_name']} (id={m['id']})"
+        builder.add(InlineKeyboardButton(
+            text=f"Отменить встречу {m['id']}",
+            callback_data=f"cancel_meeting_{m['id']}"
+        ))
+    builder.adjust(1)
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())

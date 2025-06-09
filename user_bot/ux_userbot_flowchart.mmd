@@ -1,0 +1,54 @@
+flowchart TD
+    Start["/start или Новый пользователь"]
+    Reg["Регистрация: Ввод имени, фамилии, возраста, ответы на вопросы"]
+    MainMenu["Главное меню\n📝 Подать заявку | 📅 Мои встречи\n👤 Профиль | 📨 Мои заявки | ❓ Помощь"]
+
+    %% Главное меню
+    Start --> Reg
+    Reg --> MainMenu
+
+    %% Подать заявку
+    MainMenu --> Apply["📝 Подать заявку"]
+    Apply --> City["Выбор города"]
+    City -->|⬅️ Назад| MainMenu
+    City --> TimeSlot["Выбор временного слота"]
+    TimeSlot -->|⬅️ Назад| City
+    TimeSlot --> ConfirmApp["Подтвердить заявку"]
+    ConfirmApp -->|⬅️ Назад| TimeSlot
+    ConfirmApp --> AppStatus["Статус заявки\n(ожидание/одобрено/отклонено)"]
+    AppStatus -->|⬅️ В меню| MainMenu
+
+    %% Мои встречи
+    MainMenu --> MyMeetings["📅 Мои встречи"]
+    MyMeetings --> Upcoming["Ближайшие встречи"]
+    MyMeetings --> Past["Прошедшие встречи"]
+    Upcoming --> MeetingDetails["Детали встречи"]
+    MeetingDetails -->|⬅️ Назад| Upcoming
+    MeetingDetails --> CancelMeeting["Отменить участие"]
+    CancelMeeting --> ConfirmCancel["Вы уверены?\nДа/Нет"]
+    ConfirmCancel -->|Да| MainMenu
+    ConfirmCancel -->|Нет| MeetingDetails
+    Past --> Feedback["Оставить отзыв"]
+    Feedback -->|⬅️ Назад| Past
+    MyMeetings -->|⬅️ Назад| MainMenu
+
+    %% Профиль
+    MainMenu --> Profile["👤 Профиль"]
+    Profile --> ViewProfile["Просмотр анкеты"]
+    ViewProfile --> EditProfile["✏️ Редактировать анкету"]
+    EditProfile --> QuestionsList["Список вопросов"]
+    QuestionsList --> EditAnswer["Изменить ответ"]
+    EditAnswer --> QuestionsList
+    QuestionsList -->|⬅️ Назад| ViewProfile
+    ViewProfile -->|⬅️ Назад| Profile
+    Profile -->|⬅️ Назад| MainMenu
+
+    %% Мои заявки
+    MainMenu --> Applications["📨 Мои заявки"]
+    Applications --> AppList["Список заявок и статусов"]
+    AppList -->|⬅️ Назад| Applications
+    Applications -->|⬅️ Назад| MainMenu
+
+    %% Помощь
+    MainMenu --> Help["❓ Помощь"]
+    Help -->|⬅️ В меню| MainMenu 

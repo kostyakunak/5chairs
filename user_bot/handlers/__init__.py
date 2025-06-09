@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 # Import handlers
 from user_bot.handlers.start import register_start_handlers
+from user_bot.handlers.application import router as application_router
 # from user_bot.handlers.profile import register_profile_handlers  # Удалено
 # from user_bot.handlers.application import register_application_handlers
 from user_bot.handlers.meetings import register_meetings_handlers
@@ -34,6 +35,7 @@ def register_user_handlers(dp: Dispatcher):
     
     # Register handlers in the correct order
     register_start_handlers(dp)
+    dp.include_router(application_router)
     # register_profile_handlers(dp)  # Удалено
     register_activities_handlers(dp)
     # register_events_handlers(dp)

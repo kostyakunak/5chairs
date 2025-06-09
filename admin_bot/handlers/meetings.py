@@ -311,27 +311,27 @@ async def process_venue_selection(callback: CallbackQuery, state: FSMContext):
         return
     meeting_name = f"{city['name']}: {venue['name']} {meeting_date.strftime('%d.%m.%Y')}"
     await state.update_data(meeting_name=meeting_name)
-    meeting_id = await create_meeting(
+        meeting_id = await create_meeting(
         name=meeting_name,
         meeting_date=meeting_date,
         meeting_time=meeting_time,
-        city_id=data['city_id'],
+            city_id=data['city_id'],
         venue=venue['name'],
         created_by=callback.from_user.id,
         venue_address=venue['address']
     )
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
+        keyboard = ReplyKeyboardMarkup(
+            keyboard=[
             # ...
-        ],
-        resize_keyboard=True
-    )
+            ],
+            resize_keyboard=True
+        )
     await callback.message.answer(
         f"Встреча '{meeting_name}' успешно создана!\n\nХотите добавить участников сейчас?",
-        reply_markup=keyboard
-    )
-    await state.update_data(meeting_id=meeting_id)
-    await state.set_state(MeetingManagementStates.add_members)
+            reply_markup=keyboard
+        )
+        await state.update_data(meeting_id=meeting_id)
+        await state.set_state(MeetingManagementStates.add_members)
 
 # Smart Meeting Creation handler
 @router.message(F.text == "Smart Meeting Creation")
@@ -341,7 +341,7 @@ async def smart_meeting_creation(message: Message, state: FSMContext):
         return
     
     # Clear any previous state
-    await state.clear()
+        await state.clear()
 
     # Get active cities
     cities = await get_active_cities()
@@ -523,7 +523,7 @@ async def edit_meeting_select_timeslot(callback: CallbackQuery, state: FSMContex
     if not ts:
         logger.error(f"[ERROR] Таймслот не найден: id={time_slot_id}")
         await callback.message.edit_text("Ошибка: таймслот не найден.")
-        return
+            return
     new_time = ts['start_time']
 
     # Обновляем дату и время встречи
@@ -546,7 +546,7 @@ async def edit_meeting_select_timeslot(callback: CallbackQuery, state: FSMContex
 async def process_meeting_selection(callback: CallbackQuery, state: FSMContext, meeting_id: Optional[int] = None):
     logger.warning(f"[DEBUG] process_meeting_selection: callback.data={callback.data}")
     if meeting_id is None:
-        meeting_id = int(callback.data.split('_')[-1])
+    meeting_id = int(callback.data.split('_')[-1])
     data = await state.get_data()
     city_id = data.get('city_id')
     logger.warning(f"[DEBUG] process_meeting_selection: meeting_id={meeting_id}, city_id={city_id}")
@@ -563,18 +563,18 @@ async def process_meeting_selection(callback: CallbackQuery, state: FSMContext, 
         text="Участники",
         callback_data=f"members_meeting_{meeting_id}"
     ))
-    builder.add(InlineKeyboardButton(
+        builder.add(InlineKeyboardButton(
         text="Изменить дату",
         callback_data=f"edit_meeting_date_{meeting_id}"
-    ))
-    builder.add(InlineKeyboardButton(
+        ))
+        builder.add(InlineKeyboardButton(
         text="Изменить время",
         callback_data=f"edit_meeting_time_{meeting_id}"
-    ))
-    builder.add(InlineKeyboardButton(
+        ))
+        builder.add(InlineKeyboardButton(
         text="Удалить встречу",
         callback_data=f"del_{meeting_id}"
-    ))
+        ))
     builder.add(InlineKeyboardButton(
         text="Назад к списку встреч",
         callback_data=f"list_meetings_city_{city_id}"
@@ -654,8 +654,8 @@ async def smart_meeting_date_selected(callback: CallbackQuery, state: FSMContext
         ''', date_obj, city_id)
     if not slots:
         await callback.message.edit_text("Нет таймслотов для выбранной даты.")
-        return
-    builder = InlineKeyboardBuilder()
+            return
+            builder = InlineKeyboardBuilder()
     for ts in slots:
         builder.add(InlineKeyboardButton(
             text=f"{ts['start_time'].strftime('%H:%M')}-{ts['end_time'].strftime('%H:%M')}",
@@ -664,12 +664,12 @@ async def smart_meeting_date_selected(callback: CallbackQuery, state: FSMContext
     builder.add(InlineKeyboardButton(
         text="Назад",
         callback_data=f"smart_meeting_city_{city_id}"
-    ))
+        ))
     builder.add(InlineKeyboardButton(
         text="Cancel",
         callback_data="cancel_smart_meeting"
     ))
-    builder.adjust(1)
+            builder.adjust(1)
     await callback.message.edit_text("Выберите таймслот для встречи:", reply_markup=builder.as_markup())
     await state.set_state(MeetingManagementStates.smart_meeting_timeslot)
 
@@ -683,7 +683,7 @@ async def smart_meeting_timeslot_selected(callback: CallbackQuery, state: FSMCon
         ts = await conn.fetchrow('SELECT start_time FROM time_slots WHERE id = $1', time_slot_id)
     if not ts:
         await callback.message.edit_text("Ошибка: таймслот не найден.")
-        return
+            return
     await state.update_data(meeting_time=ts['start_time'])
     data = await state.get_data()
     city_id = data['city_id']
@@ -708,8 +708,8 @@ async def smart_meeting_timeslot_selected(callback: CallbackQuery, state: FSMCon
     builder.adjust(2)
     await callback.message.edit_text(
         f"Выберите площадку для встречи:",
-        reply_markup=builder.as_markup()
-    )
+                reply_markup=builder.as_markup()
+            )
     await state.set_state(MeetingManagementStates.smart_meeting_venue)
 
 # --- Smart Meeting Creation: выбор площадки из списка или вручную ---
@@ -760,7 +760,7 @@ async def continue_smart_meeting_after_venue(msg_obj, state: FSMContext):
         ''', meeting_date, meeting_time, city_id)
         if not slot_row:
             await msg_obj.answer("Не удалось определить таймслот для этой встречи.")
-            return
+        return
         time_slot_id = slot_row['id']
     await state.update_data(time_slot_id=time_slot_id)
     # --- Получаем аппликантов ---
@@ -810,7 +810,7 @@ async def smart_profile_action(callback: CallbackQuery, state: FSMContext):
     user_id = int(parts[-1]) if parts[-1].isdigit() else None
     smart_selected = data.get('smart_selected_users', [])
     if action == "view_user":
-        await show_applicant_profile(callback, 0, user_id, None, None, state)
+    await show_applicant_profile(callback, 0, user_id, None, None, state)
         return
     if action == "add_user":
         if user_id not in smart_selected:
