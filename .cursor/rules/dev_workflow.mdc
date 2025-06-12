@@ -1,8 +1,3 @@
----
-description: Guide for using Task Master to manage task-driven development workflows
-globs: **/*
-alwaysApply: true
----
 # Task Master Development Workflow
 
 This guide outlines the typical process for using Task Master to manage software development projects.
@@ -217,3 +212,14 @@ Once a task has been broken down into subtasks using `expand_task` or similar me
 
 ---
 *This workflow provides a general guideline. Adapt it based on your specific project needs and team practices.*
+
+---
+description: Все потенциально опасные изменения должны быть явно отмечены и протестированы в обоих ботах
+alwaysApply: true
+---
+
+- **Потенциально опасные изменения**
+    - Любые изменения в структуре базы данных, общих функциях (например, database/db.py), бизнес-логике, которые могут затронуть оба бота, должны быть явно отмечены в ходе работы.
+    - После внесения таких изменений обязательно провести тестирование как юзер-бота, так и админ-бота на тестовой базе.
+    - Новые таблицы, используемые только юзер-ботом (например, meeting_feedback), не требуют тестирования админ-бота.
+    - Перед деплоем любых изменений, затрагивающих общие сущности, убедиться в корректной работе обоих ботов.

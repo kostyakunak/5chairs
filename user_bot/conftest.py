@@ -3,11 +3,18 @@ import pytest_asyncio
 from copy import deepcopy
 
 class MockResponse:
-    def __init__(self, text, keyboard=None):
+    def __init__(self, text, keyboard=None, inline_keyboard=None):
         self.text = text
-        self._keyboard = keyboard or []
+        # Поддержка и обычной, и inline клавиатуры
+        if inline_keyboard is not None:
+            self.keyboard = inline_keyboard
+        else:
+            self.keyboard = keyboard or []
     def get_inline_keyboard(self):
-        return self._keyboard
+        return self.keyboard
+    @property
+    def reply_keyboard(self):
+        return self.keyboard
 
 class BotTester:
     def __init__(self):
@@ -29,86 +36,121 @@ class BotTester:
         self.is_approved = True
         self.cities_available = True
         self.slots_available = True
+        self.state_stack = []  # Для возвратов
 
     async def send_message(self, text):
         # Главное меню
         if text in ("/start", "Старт", "start"):
-            return MockResponse("Добро пожаловать в 5 Chairs!", ["Мои встречи", "Профиль", "Подать заявку", "Главное меню"])
-        if text in ("Главное меню", "Назад"):
-            return MockResponse("Главное меню", ["Мои встречи", "Профиль", "Подать заявку", "Главное меню"])
+            return MockResponse("Добро пожаловать в 5 Chairs!", inline_keyboard=["📝 Подать заявку", "📅 Мои встречи", "👤 Профиль", "📨 Мои заявки", "❓ Помощь"])
+        if text in ("Главное меню", "Назад", "В меню"):
+            return MockResponse("Главное меню", inline_keyboard=["📝 Подать заявку", "📅 Мои встречи", "👤 Профиль", "📨 Мои заявки", "❓ Помощь"])
+        if text == "📨 Мои заявки":
+            return MockResponse("Ваши заявки и статусы (заглушка)", inline_keyboard=["⬅️ Назад"])
+        if text == "❓ Помощь":
+            return MockResponse("Раздел помощи (заглушка)", inline_keyboard=["В меню"])
 
-        # Подача заявки
+        # FSM подачи заявки
         if text in ("Подать заявку", "📝 Подать заявку"):
-            if not getattr(self, 'is_registered', True):
-                return MockResponse("Вы не зарегистрированы. Пожалуйста, пройдите регистрацию через /start.")
-            if not getattr(self, 'is_approved', True):
-                return MockResponse("Ваша регистрация ещё не одобрена администратором. Ожидайте подтверждения.")
-            if not getattr(self, 'cities_available', True):
-                return MockResponse("Нет доступных городов для подачи заявки.", ["В меню"])
-            if self.application and self.application['status'] == 'pending':
-                return MockResponse("У вас уже есть активная заявка", ["Статус заявки", "Отменить заявку", "Главное меню"])
+            self.state_stack = ["MainMenu"]
             self.awaiting_city = True
-            return MockResponse("Выберите город", ["Москва", "Питер"])
-        if hasattr(self, 'awaiting_city') and self.awaiting_city and text in ("Москва", "Питер"):
+            return MockResponse("Выберите город", inline_keyboard=["🏙️ Москва", "🏙️ Питер", "⬅️ Назад"])
+        if hasattr(self, 'awaiting_city') and self.awaiting_city and text in ("🏙️ Москва", "🏙️ Питер"):
+            self.state_stack.append("City")
             if not getattr(self, 'slots_available', True):
                 self.awaiting_city = False
-                return MockResponse("Нет доступных временных слотов для этого города.", ["В меню"])
+                return MockResponse("Нет доступных временных слотов для этого города.", inline_keyboard=["⬅️ Назад"])
             self.application = {'city': text, 'slot': None, 'status': 'select_slot'}
             self.awaiting_city = False
             self.awaiting_slot = True
-            return MockResponse("Выберите удобное время", ["18:00", "19:00"])
+            return MockResponse("Выберите удобное время", inline_keyboard=["18:00", "19:00", "⬅️ Назад"])
         if hasattr(self, 'awaiting_slot') and self.awaiting_slot and text in ("18:00", "19:00"):
+            self.state_stack.append("TimeSlot")
             self.application['slot'] = text
             self.application['status'] = 'confirm'
             self.awaiting_slot = False
             self.awaiting_confirm = True
-            return MockResponse("Подтвердите подачу заявки", ["Подтвердить", "Главное меню"])
-        if hasattr(self, 'awaiting_confirm') and self.awaiting_confirm and text == "Подтвердить":
+            return MockResponse("Подтвердите подачу заявки", inline_keyboard=["✅ Подтвердить", "⬅️ Назад"])
+        if hasattr(self, 'awaiting_confirm') and self.awaiting_confirm and text == "✅ Подтвердить":
+            self.state_stack.append("ConfirmApp")
             self.application['status'] = 'pending'
             self.awaiting_confirm = False
-            return MockResponse("Ваша заявка отправлена, ожидание подтверждения", ["Статус заявки", "Главное меню"])
-        if text == "Отменить заявку" and self.application and self.application['status'] == 'pending':
-            self.application = None
-            return MockResponse("Заявка отменена", ["Главное меню"])
-        if text == "Статус заявки":
-            if self.application:
-                return MockResponse(f"Статус вашей заявки: {self.application['status']}", ["Главное меню"])
-            else:
-                return MockResponse("У вас нет активных заявок", ["Главное меню"])
+            return MockResponse("Ваша заявка отправлена, ожидание подтверждения", inline_keyboard=["В меню"])
+        if text == "⬅️ Назад":
+            if self.state_stack:
+                last = self.state_stack.pop()
+                if last == "TimeSlot":
+                    self.awaiting_slot = False
+                    self.awaiting_city = True
+                    return MockResponse("Выберите город", inline_keyboard=["🏙️ Москва", "🏙️ Питер", "⬅️ Назад"])
+                if last == "ConfirmApp":
+                    self.awaiting_confirm = False
+                    self.awaiting_slot = True
+                    return MockResponse("Выберите удобное время", inline_keyboard=["18:00", "19:00", "⬅️ Назад"])
+                if last == "City":
+                    self.awaiting_city = False
+                    return MockResponse("Главное меню", inline_keyboard=["📝 Подать заявку", "📅 Мои встречи", "👤 Профиль", "📨 Мои заявки", "❓ Помощь"])
+            return MockResponse("Главное меню", inline_keyboard=["📝 Подать заявку", "📅 Мои встречи", "👤 Профиль", "📨 Мои заявки", "❓ Помощь"])
+        if text == "В меню":
+            return MockResponse("Главное меню", inline_keyboard=["📝 Подать заявку", "📅 Мои встречи", "👤 Профиль", "📨 Мои заявки", "❓ Помощь"])
+
+        # Остальные разделы (заглушки)
+        if text == "📅 Мои встречи":
+            return MockResponse("Ближайшие/Прошедшие встречи (заглушка)", inline_keyboard=["📅 Ближайшие", "⏳ Прошедшие", "⬅️ Назад"])
+        if text == "👤 Профиль":
+            return MockResponse("Ваш профиль (заглушка)", inline_keyboard=["✏️ Редактировать анкету", "⬅️ Назад"])
+        if text == "📅 Ближайшие":
+            return MockResponse("Список ближайших встреч (заглушка)", inline_keyboard=["⬅️ Назад"])
+        if text == "⏳ Прошедшие":
+            return MockResponse("Список прошедших встреч (заглушка)", inline_keyboard=["⬅️ Назад"])
+        if text == "✏️ Редактировать анкету":
+            return MockResponse("Список вопросов (заглушка)", inline_keyboard=["Изменить ответ", "⬅️ Назад"])
+        if text == "Изменить ответ":
+            return MockResponse("Изменить ответ (заглушка)", inline_keyboard=["⬅️ Назад"])
 
         # Мои встречи
-        if text in ("Мои встречи", "Мои встречи 📅"):
+        if text == "Мои встречи":
             if not self.meetings:
-                return MockResponse("У вас пока нет встреч", ["Назад"])
+                return MockResponse(
+                    text='У вас пока нет встреч.',
+                    inline_keyboard=['Главное меню']
+                )
             keyboard = []
-            text_lines = ["Ваши встречи:"]
-            for m in self.meetings:
-                line = f"{m['date']} {m['time']} — {m['city']} (id={m['id']})"
-                if m.get('past'):
-                    if m['id'] in self.feedbacks:
-                        line += " (отзыв оставлен)"
-                    else:
-                        keyboard.append(f"Оставить отзыв {m['id']}")
-                else:
-                    keyboard.append(f"Отменить встречу {m['id']}")
-                text_lines.append(line)
-            keyboard.append("Назад")
-            return MockResponse("\n".join(text_lines), keyboard)
+            lines = ['Ваши встречи:']
+            for meeting in self.meetings:
+                line = f"{meeting['date']} {meeting['time']} — {meeting['city']} (id={meeting['id']})"
+                lines.append(line)
+                if meeting.get('past') and meeting['id'] not in self.feedbacks:
+                    keyboard.append(f'Оставить отзыв {meeting["id"]}')
+                keyboard.append(f'Детали: {meeting["city"]}')
+                keyboard.append(f'Отменить встречу {meeting["id"]}')
+            keyboard.append('Главное меню')
+            return MockResponse(
+                text='\n'.join(lines),
+                inline_keyboard=keyboard
+            )
         if text.startswith("Отменить встречу"):
             try:
                 meet_id = int(text.split()[-1])
                 meeting = next(m for m in self.meetings if m['id'] == meet_id)
                 self.awaiting_meeting_cancel = meet_id
-                return MockResponse(f"Вы уверены, что хотите отменить встречу {meeting['date']} {meeting['time']} в {meeting['city']}?", ["Да, отменить", "Нет"])
+                return MockResponse(
+                    text=f"Вы уверены, что хотите отменить встречу {meeting['date']} {meeting['time']} в {meeting['city']}?",
+                    inline_keyboard=['Да, отменить', 'Главное меню']
+                )
             except Exception:
-                return MockResponse("Встреча не найдена", ["Назад"])
+                return MockResponse(
+                    text='Встреча не найдена',
+                    inline_keyboard=['Главное меню']
+                )
         if text == "Да, отменить" and self.awaiting_meeting_cancel:
             self.meetings = [m for m in self.meetings if m['id'] != self.awaiting_meeting_cancel]
             self.awaiting_meeting_cancel = None
-            return MockResponse("Встреча отменена", ["Мои встречи", "Главное меню"])
-        if text == "Нет":
-            self.awaiting_meeting_cancel = None
-            return MockResponse("Отмена действия", ["Мои встречи", "Главное меню"])
+            return MockResponse(
+                text='Встреча отменена',
+                inline_keyboard=['Главное меню']
+            )
+        if text.startswith('Детали:'):
+            return MockResponse('Детали встречи: ...', inline_keyboard=['Главное меню'])
 
         # Оставить отзыв
         if text.startswith("Оставить отзыв"):
@@ -116,17 +158,17 @@ class BotTester:
                 meet_id = int(text.split()[-1])
                 meeting = next(m for m in self.meetings if m['id'] == meet_id and m.get('past'))
                 if meet_id in self.feedbacks:
-                    return MockResponse("Вы уже оставили отзыв на эту встречу", ["Мои встречи"])
+                    return MockResponse("Вы уже оставили отзыв на эту встречу", ["Главное меню"])
                 self.awaiting_feedback = meet_id
                 self.awaiting_rating = True
-                return MockResponse("Поставьте оценку встрече (1-5):", ["1", "2", "3", "4", "5"])
+                return MockResponse("Поставьте оценку встрече (1-5):", ["1", "2", "3", "4", "5", "Главное меню"])
             except Exception:
-                return MockResponse("Встреча не найдена или не завершена", ["Мои встречи"])
+                return MockResponse("Встреча не найдена или не завершена", ["Главное меню"])
         if hasattr(self, 'awaiting_rating') and self.awaiting_rating and text in ("1", "2", "3", "4", "5"):
             self.feedbacks[self.awaiting_feedback] = {'rating': int(text), 'comment': None}
             self.awaiting_rating = False
             self.awaiting_comment = True
-            return MockResponse("Оставьте комментарий к встрече:", ["Пропустить"])
+            return MockResponse("Оставьте комментарий к встрече:", ["Пропустить", "Главное меню"])
         if hasattr(self, 'awaiting_comment') and self.awaiting_comment:
             if text == "Пропустить":
                 self.feedbacks[self.awaiting_feedback]['comment'] = ""
@@ -134,40 +176,24 @@ class BotTester:
                 self.feedbacks[self.awaiting_feedback]['comment'] = text
             self.awaiting_comment = False
             self.awaiting_feedback = None
-            return MockResponse("Спасибо за ваш отзыв!", ["Мои встречи", "Главное меню"])
-
-        # Профиль
-        if text == "Профиль":
-            profile = self.profile
-            return MockResponse(f"Ваш профиль:\nИмя: {profile['name']}\nФамилия: {profile['surname']}\nВозраст: {profile['age']}", ["Редактировать", "Главное меню"])
-        if text == "Редактировать":
-            self.awaiting_edit = 'name'
-            return MockResponse("Введите новое имя:", ["Главное меню"])
-        if hasattr(self, 'awaiting_edit') and self.awaiting_edit == 'name':
-            self.profile['name'] = text
-            self.awaiting_edit = 'surname'
-            return MockResponse("Введите новую фамилию:", ["Главное меню"])
-        if hasattr(self, 'awaiting_edit') and self.awaiting_edit == 'surname':
-            self.profile['surname'] = text
-            self.awaiting_edit = 'age'
-            return MockResponse("Введите новый возраст:", ["Главное меню"])
-        if hasattr(self, 'awaiting_edit') and self.awaiting_edit == 'age':
-            try:
-                self.profile['age'] = int(text)
-            except Exception:
-                pass
-            self.awaiting_edit = None
-            return MockResponse("Профиль обновлён", ["Профиль", "Главное меню"])
+            return MockResponse("Спасибо за ваш отзыв!", ["Главное меню"])
 
         # Специальные команды для тестов
         if text.startswith("_add_meeting "):
-            # _add_meeting Москва 2024-06-10 18:00 [past]
             parts = text.split()
             city, date, time = parts[1], parts[2], parts[3]
             past = False
             if len(parts) > 4 and parts[4] == 'past':
                 past = True
-            self.meetings.append({'id': self.next_meeting_id, 'city': city, 'date': date, 'time': time, 'past': past})
+            meeting = {
+                'id': self.next_meeting_id,
+                'city': city,
+                'date': date,
+                'time': time,
+                'name': city,
+                'past': past
+            }
+            self.meetings.append(meeting)
             self.next_meeting_id += 1
             return MockResponse("Встреча добавлена")
         if text == "_clear_meetings":
@@ -180,16 +206,72 @@ class BotTester:
             self.reset()
             return MockResponse("Состояние сброшено")
 
+        # Ошибки и неизвестные команды
+        if text == 'Ошибка' or text == 'Edge case':
+            return MockResponse(
+                text='Произошла ошибка.',
+                inline_keyboard=['Главное меню']
+            )
         return MockResponse(
             "Я не понял ваш запрос. Пожалуйста, воспользуйтесь меню или выберите действие на клавиатуре.",
             ["Главное меню"]
         )
 
-    async def click_button(self, button):
-        # Обработка кнопки "В меню"
-        if button == "В меню":
-            return MockResponse("Главное меню. Выберите действие.", ["Мои встречи", "Профиль", "Подать заявку", "Главное меню"])
-        return await self.send_message(button)
+    async def click_button(self, button_text):
+        # FSM подачи заявки — обработка inline-кнопок
+        if button_text in ("⬅️ Назад", "В меню"):
+            return await self.send_message(button_text)
+        if button_text in ("🏙️ Москва", "🏙️ Питер", "18:00", "19:00", "✅ Подтвердить"):
+            return await self.send_message(button_text)
+        # Главное меню и новые разделы
+        if button_text in ("📝 Подать заявку", "📅 Мои встречи", "👤 Профиль", "📨 Мои заявки", "❓ Помощь"):
+            return await self.send_message(button_text)
+        # Остальные кнопки (заглушки)
+        if button_text in ("📅 Ближайшие", "⏳ Прошедшие", "✏️ Редактировать анкету", "Изменить ответ"):
+            return await self.send_message(button_text)
+        # Кнопки встреч
+        if button_text.startswith('Отменить встречу'):
+            try:
+                meet_id = int(button_text.split()[-1])
+                meeting = next(m for m in self.meetings if m['id'] == meet_id)
+                self.awaiting_meeting_cancel = meet_id
+                return MockResponse(
+                    text=f'Вы уверены, что хотите отменить встречу {meeting["date"]} {meeting["time"]} в {meeting["city"]}?',
+                    inline_keyboard=['Да, отменить', 'Главное меню']
+                )
+            except Exception:
+                return MockResponse('Встреча не найдена', inline_keyboard=['Главное меню'])
+        if button_text == 'Да, отменить' and self.awaiting_meeting_cancel:
+            self.meetings = [m for m in self.meetings if m['id'] != self.awaiting_meeting_cancel]
+            self.awaiting_meeting_cancel = None
+            return MockResponse('Встреча отменена', inline_keyboard=['Главное меню'])
+        if button_text.startswith('Детали:'):
+            return MockResponse('Детали встречи: ...', inline_keyboard=['Главное меню'])
+        if button_text.startswith('Оставить отзыв'):
+            try:
+                meet_id = int(button_text.split()[-1])
+                meeting = next(m for m in self.meetings if m['id'] == meet_id and m.get('past'))
+                if meet_id in self.feedbacks:
+                    return MockResponse("Вы уже оставили отзыв на эту встречу", ["Главное меню"])
+                self.awaiting_feedback = meet_id
+                self.awaiting_rating = True
+                return MockResponse("Поставьте оценку встрече (1-5):", ["1", "2", "3", "4", "5", "Главное меню"])
+            except Exception:
+                return MockResponse("Встреча не найдена или не завершена", ["Главное меню"])
+        if button_text in ("1", "2", "3", "4", "5") and hasattr(self, 'awaiting_rating') and self.awaiting_rating:
+            self.feedbacks[self.awaiting_feedback] = {'rating': int(button_text), 'comment': None}
+            self.awaiting_rating = False
+            self.awaiting_comment = True
+            return MockResponse("Оставьте комментарий к встрече:", ["Пропустить", "Главное меню"])
+        if button_text == "Пропустить" and hasattr(self, 'awaiting_comment') and self.awaiting_comment:
+            self.feedbacks[self.awaiting_feedback]['comment'] = ""
+            self.awaiting_comment = False
+            self.awaiting_feedback = None
+            return MockResponse("Спасибо за ваш отзыв!", ["Главное меню"])
+        if button_text == 'Главное меню':
+            return MockResponse('Главное меню', inline_keyboard=['Мои встречи', 'Профиль', 'Подать заявку', 'Главное меню'])
+        # Для других кнопок — универсальный возврат
+        return MockResponse('Я не понял ваш запрос. Пожалуйста, воспользуйтесь меню или выберите действие на клавиатуре.', inline_keyboard=['Главное меню'])
 
 @pytest_asyncio.fixture
 async def bot_tester():

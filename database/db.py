@@ -414,16 +414,16 @@ async def get_user_answers(user_id):
         ''', user_id)
 
 # Application operations
-async def get_or_create_application(user_id):
-    """Get existing application or create a new one"""
+async def get_or_create_application(user_id, time_slot_id):
+    """Get existing application for this slot or create a new one"""
     async with pool.acquire() as conn:
         return await conn.fetchval('''
-            INSERT INTO applications (user_id, created_at, status)
-            VALUES ($1, $2, 'pending')
-            ON CONFLICT (user_id) DO UPDATE
-            SET user_id = $1
+            INSERT INTO applications (user_id, time_slot_id, created_at, status)
+            VALUES ($1, $2, $3, 'pending')
+            ON CONFLICT (user_id, time_slot_id) DO UPDATE
+            SET status = 'pending', created_at = $3
             RETURNING id
-        ''', user_id, datetime.now())
+        ''', user_id, time_slot_id, datetime.now())
 
 # Admin operations
 async def add_admin(admin_id, username, name, is_superadmin=False):
@@ -949,3 +949,23 @@ async def get_pool():
     if pool is None:
         await init_db()
     return pool
+
+async def get_user_applications(user_id):
+    """
+    Возвращает все заявки пользователя (applications) с расширенными данными по слоту и городу.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch('''
+            SELECT 
+                a.*, 
+                u.name AS user_name, u.surname AS user_surname, u.username AS user_username, u.age AS user_age, u.registration_date,
+                ts.id AS timeslot_id, ts.day_of_week, ts.start_time AS time, ts.end_time,
+                c.id AS city_id, c.name AS city_name
+            FROM applications a
+            JOIN users u ON a.user_id = u.id
+            JOIN time_slots ts ON a.time_slot_id = ts.id
+            JOIN cities c ON ts.city_id = c.id
+            WHERE a.user_id = $1
+            ORDER BY a.created_at DESC
+        ''', user_id)
+        return [dict(row) for row in rows]

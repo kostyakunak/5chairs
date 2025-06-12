@@ -1,44 +1,177 @@
 import logging
 from aiogram import Router, F
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # Set up logger
 logger = logging.getLogger(__name__)
 
-from database.db import add_user, get_user, get_active_questions, add_user_answer
+from database.db import add_user, get_user, get_active_questions, add_user_answer, get_user_answers
 from user_bot.states import RegistrationStates
 
 # Create router
 router = Router()
 
-# Start command handler
+# --- ТЕКСТЫ ДЛЯ ГЛАВНОГО МЕНЮ ---
+MAIN_MENU_TEXT_REGISTERED = "С возвращением, /apply! Вы уже зарегистрированы."
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: ГЛАВНОЕ МЕНЮ ---
+def get_main_menu():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📝 Подать заявку", callback_data="main_apply")
+    builder.button(text="📅 Мои встречи", callback_data="main_meetings")
+    builder.button(text="👤 Профиль", callback_data="main_profile")
+    builder.button(text="❓ Помощь", callback_data="main_help")
+    builder.adjust(2)
+    return builder.as_markup()
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: ПОКАЗ ГЛАВНОГО МЕНЮ (без приветствия, с user_id) ---
+async def show_main_menu(message, state, user_id=None):
+    if user_id is None:
+        user_id = message.from_user.id
+    user = await get_user(user_id)
+    logger.info(f"show_main_menu: user_id={user_id}, user={user}")
+    if user:
+        logger.info(f"show_main_menu: user['name'] = {user.get('name')}")
+        await message.answer(
+            "Главное меню",
+            reply_markup=get_main_menu()
+        )
+        return
+    await message.answer(
+        "Добро пожаловать в 5 Chairs! 🪑🪑🪑🪑🪑\n\n"
+        "Этот бот поможет найти и посетить офлайн-встречи с единомышленниками.\n\n"
+        "Давайте начнём регистрацию. Как вас зовут?"
+    )
+    await state.set_state(RegistrationStates.name)
+
+# --- /start ---
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username
-    
-    # Check if user already exists
+    logger.info(f"/start: user_id={user_id}, username={username}")
     user = await get_user(user_id)
-    
+    logger.info(f"/start: get_user({user_id}) -> {user}")
     if user:
+        logger.info(f"/start: user['name'] = {user.get('name')}")
         await message.answer(
-            f"Welcome back, {user['name']}! You are already registered.\n"
-            f"Use the Apply button to browse and apply for available events."
+            "Главное меню",
+            reply_markup=get_main_menu()
         )
         return
-    
-    # Start registration process
     await message.answer(
-        "Welcome to 5 Chairs! 🪑🪑🪑🪑🪑\n\n"
-        "This bot helps you find and join meetups with like-minded people.\n\n"
-        "Let's start with your registration. What's your name?"
+        "Добро пожаловать в 5 Chairs! 🪑🪑🪑🪑🪑\n\n"
+        "Этот бот поможет найти и посетить офлайн-встречи с единомышленниками.\n\n"
+        "Давайте начнём регистрацию. Как вас зовут?"
     )
-    
-    # Set state to wait for name
     await state.set_state(RegistrationStates.name)
+
+# --- /menu ---
+@router.message(Command("menu"))
+async def cmd_menu(message: Message, state: FSMContext):
+    await show_main_menu(message, state)
+
+# --- CALLBACK: Главное меню (универсальный возврат) ---
+@router.callback_query(F.data == "main_menu")
+async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    last_msg_id = data.get("last_private_message_id")
+    if last_msg_id:
+        try:
+            await callback.bot.delete_message(callback.message.chat.id, last_msg_id)
+        except Exception:
+            pass
+        await state.update_data(last_private_message_id=None)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await show_main_menu(callback.message, state, user_id=callback.from_user.id)
+
+# --- CALLBACK: Подача заявки (заглушка, переход к FSM реализуется в application.py) ---
+@router.callback_query(F.data == "main_apply")
+async def cb_apply(callback: CallbackQuery, state: FSMContext):
+    from user_bot.handlers.application import start_application
+    await start_application(callback, state, is_callback=True)
+
+# --- CALLBACK: Мои встречи (заглушка, переход к meetings реализуется в meetings.py) ---
+@router.callback_query(F.data == "main_meetings")
+async def cb_meetings(callback: CallbackQuery, state: FSMContext):
+    from user_bot.handlers.meetings import cmd_meetings
+    await cmd_meetings(callback, state, is_callback=True)
+
+# --- CALLBACK: Профиль (заглушка) ---
+@router.callback_query(F.data == "main_profile")
+async def cb_profile(callback: CallbackQuery, state: FSMContext):
+    from database.db import get_user, get_active_questions, get_user_answers
+    user_id = callback.from_user.id
+    user = await get_user(user_id)
+    if not user:
+        msg = await callback.message.edit_text("Профиль не найден. Пожалуйста, зарегистрируйтесь через /start.", reply_markup=get_main_menu())
+        await state.update_data(last_private_message_id=msg.message_id)
+        return
+    text = f"👤 Ваш профиль:\n\n"
+    text += f"Имя: {user.get('name', '-') }\n"
+    text += f"Фамилия: {user.get('surname', '-') }\n"
+    text += f"Возраст: {user.get('age', '-') }\n"
+    # Получаем вопросы и ответы
+    questions = await get_active_questions()
+    answers_list = await get_user_answers(user_id)
+    answers = {a['question_id']: a['answer'] for a in answers_list} if answers_list else {}
+    if questions:
+        text += "\nВаши ответы на вопросы анкеты:\n"
+        for q in questions:
+            answer = answers.get(q['id'], '—')
+            text += f"\n{q['text']}\n — {answer}\n"
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Редактировать анкету", callback_data="profile_edit")
+    builder.button(text="В меню", callback_data="main_menu")
+    builder.adjust(1)
+    msg = await callback.message.edit_text(text, reply_markup=builder.as_markup())
+    await state.update_data(last_private_message_id=msg.message_id)
+
+# --- CALLBACK: Мои заявки (заглушка) ---
+@router.callback_query(F.data == "main_applications")
+async def cb_applications(callback: CallbackQuery, state: FSMContext):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ В меню", callback_data="main_profile")
+    builder.adjust(1)
+    await callback.message.edit_text(
+        "📨 Мои заявки\n\n(Раздел в разработке)",
+        reply_markup=builder.as_markup()
+    )
+
+# --- CALLBACK: Помощь (заглушка) ---
+@router.callback_query(F.data == "main_help")
+async def cb_help(callback: CallbackQuery, state: FSMContext):
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⬅️ В меню", callback_data="main_profile")
+    builder.adjust(1)
+    await callback.message.edit_text(
+        "❓ Помощь\n\nЗдесь будет справка по использованию бота.",
+        reply_markup=builder.as_markup()
+    )
+
+# --- CALLBACK: Редактирование ответа (заглушка) ---
+@router.callback_query(F.data == "profile_edit")
+async def cb_profile_edit(callback: CallbackQuery, state: FSMContext):
+    from database.db import get_active_questions, get_user_answers
+    user_id = callback.from_user.id
+    questions = await get_active_questions()
+    answers_list = await get_user_answers(user_id)
+    answers = {a['question_id']: a['answer'] for a in answers_list} if answers_list else {}
+    text = "✏️ Редактировать анкету:\n\nВыберите вопрос для изменения ответа:"
+    builder = InlineKeyboardBuilder()
+    for q in questions:
+        ans = answers.get(q['id'], '—')
+        builder.button(text=q['text'], callback_data=f"edit_answer_{q['id']}")
+    builder.button(text="⬅️ Назад", callback_data="main_profile")
+    builder.adjust(1)
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
 
 # Cancel command handler for registration
 @router.message(Command("cancel"))
@@ -243,72 +376,73 @@ async def process_question_answer(message: Message, state: FSMContext):
 
 # Helper function to complete final steps of registration
 async def complete_final_steps(message: Message, state: FSMContext):
-    # Get all registration data
     data = await state.get_data()
-    user_id = message.from_user.id
-    
-    # Create keyboard with commands
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Apply")],
-            [KeyboardButton(text="My meetings")]
-        ],
-        resize_keyboard=True
-    )
-    
-    # Finish registration
     await message.answer(
-        f"Registration complete! Welcome to 5 Chairs, {data['name']}!\n\n"
-        f"Tap 'Apply' to select a date and time for your activity. "
-        f"Use /applications to view your submitted applications.",
-        reply_markup=keyboard
+        f"Регистрация завершена! Добро пожаловать в 5 Chairs, {data['name']}!\n\n"
+        f"Выберите действие в главном меню:",
+        reply_markup=get_main_menu()
     )
-    
-    # Clear state
     await state.clear()
 
-# Help command handler
+# Help command handler (оставляем для совместимости)
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    logger.info(f"User {message.from_user.id} requested help")
     await message.answer(
-        "5 Chairs Bot Commands:\n\n"
-        "/start - Start the bot and register\n"
-        "/cancel - Cancel the registration process\n"
-        "/menu - Show the main menu\n"
-        "Apply - Select a date and time for your activity and submit your application\n"
-        "/applications - View all your applications\n"
-        "/help - Show this help message\n\n"
-        "DEPRECATED COMMANDS:\n"
-        "/activities, /events, /meetings - These have been replaced by the 'Apply' button for a simpler experience.\n"
-        "/apply - Old application system\n"
-        "/status - Old status check\n\n"
-        "You can also use the menu buttons for quick access to these features."
-    )
-
-# Menu command handler
-@router.message(Command("menu"))
-async def cmd_menu(message: Message):
-    # Create keyboard with commands
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Apply")],
-            [KeyboardButton(text="My meetings")]
-        ],
-        resize_keyboard=True
-    )
-    
-    logger.info(f"User {message.from_user.id} requested main menu")
-    
-    await message.answer(
-        "Main Menu\n\n"
-        "• Apply - Select a date and time for your activity\n"
-        "• /applications - View all your applications\n"
-        "• /help - Show help message\n",
-        reply_markup=keyboard
+        "❓ Помощь\n\nЗдесь будет справка по использованию бота.",
+        reply_markup=get_main_menu()
     )
 
 # Function to register handlers with the dispatcher
 def register_start_handlers(dp):
     logger.info("Registering start handlers")
     dp.include_router(router)
+
+class ProfileEditStates(StatesGroup):
+    waiting_for_answer = State()
+
+@router.callback_query(F.data.startswith("edit_answer_"))
+async def cb_edit_answer(callback: CallbackQuery, state: FSMContext):
+    question_id = int(callback.data.split("_")[-1])
+    await state.update_data(edit_question_id=question_id)
+    # Получаем текст вопроса и текущий ответ пользователя
+    from database.db import get_active_questions, get_user_answers
+    user_id = callback.from_user.id
+    questions = await get_active_questions()
+    answers_list = await get_user_answers(user_id)
+    answers = {a['question_id']: a['answer'] for a in answers_list} if answers_list else {}
+    question = next((q for q in questions if q['id'] == question_id), None)
+    if not question:
+        await callback.message.edit_text("Вопрос не найден.")
+        return
+    current_answer = answers.get(question_id, '—')
+    text = (
+        f"{question['text']}\n\n"
+        f"Ваш текущий ответ:\n{current_answer}\n\n"
+        f"✏️ Введите новый ответ:"
+    )
+    await callback.message.edit_text(text)
+    await state.set_state(ProfileEditStates.waiting_for_answer)
+
+@router.message(ProfileEditStates.waiting_for_answer)
+async def process_new_answer(message: Message, state: FSMContext):
+    data = await state.get_data()
+    question_id = data.get("edit_question_id")
+    answer = message.text.strip()
+    user_id = message.from_user.id
+    from database.db import add_user_answer
+    await add_user_answer(user_id, question_id, answer)
+    await message.answer("Ответ сохранён!", reply_markup=None)
+    # Возвращаем к списку вопросов
+    from database.db import get_active_questions, get_user_answers
+    questions = await get_active_questions()
+    answers_list = await get_user_answers(user_id)
+    answers = {a['question_id']: a['answer'] for a in answers_list} if answers_list else {}
+    text = "✏️ Редактировать анкету:\n\nВыберите вопрос для изменения ответа:"
+    builder = InlineKeyboardBuilder()
+    for q in questions:
+        ans = answers.get(q['id'], '—')
+        builder.button(text=q['text'], callback_data=f"edit_answer_{q['id']}")
+    builder.button(text="⬅️ Назад", callback_data="main_profile")
+    builder.adjust(1)
+    await message.answer(text, reply_markup=builder.as_markup())
+    await state.clear()
